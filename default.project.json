@@ -1,0 +1,99 @@
+{
+  "name": "NightShiftBlacksite",
+  "globIgnorePaths": [
+    "**/*.spec.luau"
+  ],
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Shared": {
+        "$path": "src/shared"
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "NightShift": {
+        "$path": "src/server"
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "$properties": {
+        "CameraMode": "LockFirstPerson",
+        "EnableMouseLockOption": false,
+        "CharacterWalkSpeed": 12,
+        "CharacterJumpPower": 0,
+        "AutoJumpEnabled": false
+      },
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "NightShiftClient": {
+          "$path": "src/client"
+        }
+      }
+    },
+    "Lighting": {
+      "$className": "Lighting",
+      "$properties": {
+        "Ambient": [
+          0.05,
+          0.06,
+          0.08
+        ],
+        "OutdoorAmbient": [
+          0.03,
+          0.03,
+          0.04
+        ],
+        "Brightness": 0.6,
+        "ClockTime": 0,
+        "GlobalShadows": true,
+        "EnvironmentDiffuseScale": 0.2,
+        "EnvironmentSpecularScale": 0.4,
+        "ExposureCompensation": -0.15,
+        "FogColor": [
+          0.02,
+          0.02,
+          0.03
+        ],
+        "FogStart": 60,
+        "FogEnd": 320,
+        "Technology": "ShadowMap"
+      },
+      "ColorGrade": {
+        "$className": "ColorCorrectionEffect",
+        "$properties": {
+          "Saturation": -0.18,
+          "Contrast": 0.12,
+          "TintColor": [
+            0.9,
+            0.94,
+            1.0
+          ]
+        }
+      },
+      "Bloom": {
+        "$className": "BloomEffect",
+        "$properties": {
+          "Intensity": 0.25,
+          "Size": 24,
+          "Threshold": 1.6
+        }
+      }
+    },
+    "SoundService": {
+      "$className": "SoundService",
+      "$properties": {
+        "RespectFilteringEnabled": true,
+        "AmbientReverb": "Hangar"
+      }
+    },
+    "Workspace": {
+      "$className": "Workspace",
+      "$properties": {
+        "StreamingEnabled": false
+      }
+    }
+  }
+}

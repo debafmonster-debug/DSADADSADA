@@ -1,0 +1,6 @@
+# Tool versions (install with `rokit install`; or download the same releases manually).
+[tools]
+rojo = "rojo-rbx/rojo@7.4.4"
+lune = "lune-org/lune@0.9.3"
+selene = "Kampfkarren/selene@0.27.1"
+luau-lsp = "JohnnyMorganz/luau-lsp@1.70.1"
