@@ -20,6 +20,7 @@ local GameConfig = {
 		WallThickness = 1,
 		MapOrigin = Vector3.new(0, 0, 1200), -- far from the lobby
 		LobbyOrigin = Vector3.new(0, 0, 0),
+		CinemaOrigin = Vector3.new(-1600, 400, 0), -- client-local diorama sets for in-engine shorts
 	},
 
 	Character = {

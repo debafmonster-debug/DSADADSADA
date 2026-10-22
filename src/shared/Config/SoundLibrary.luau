@@ -49,6 +49,15 @@ local Sounds: { [string]: SoundDef } = {
 	MusicChase = { id = "rbxasset://sounds/Launching rocket.wav", volume = 0.22, looped = true, pitch = 0.9 },
 	MusicEvac = { id = "rbxasset://sounds/Launching rocket.wav", volume = 0.14, looped = true, pitch = 0.6 },
 	MusicResult = { id = "rbxasset://sounds/victory.wav", volume = 0.3 },
+
+	-- in-engine shorts (prologue "Станция Восток"); played 2D by CinematicController
+	CineWind = { id = "rbxasset://sounds/Rocket whoosh 01.wav", volume = 0.35, looped = true, pitch = 0.45 },
+	CineDrill = { id = "rbxasset://sounds/bass.wav", volume = 0.3, looped = true, pitch = 0.7 },
+	CineStatic = { id = "rbxasset://sounds/Rocket whoosh 01.wav", volume = 0.3, looped = true, pitch = 1.7 },
+	CineBoom = { id = "rbxasset://sounds/impact_generic.mp3", volume = 0.9, pitch = 0.45 },
+	CineSting = { id = "rbxasset://sounds/HalloweenGhost.wav", volume = 0.6, pitch = 0.8 },
+	CineRelay = { id = "rbxasset://sounds/switch3.wav", volume = 0.7, pitch = 0.6 },
+	MusicCinematic = { id = "rbxasset://sounds/HalloweenGhost.wav", volume = 0.1, looped = true, pitch = 0.45 },
 }
 
 return Sounds
