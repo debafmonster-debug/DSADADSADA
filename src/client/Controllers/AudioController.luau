@@ -1,179 +1,273 @@
 --!nonstrict
--- Adaptive music states, sound groups for volume settings, local footsteps.
+-- Audio: sound groups, surface-aware footsteps, wind that follows weather
+-- and shelter, creature-state music that stays sparse, and a dialogue group
+-- for voice lines once they exist.
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
 
+local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
+local Station = require(ReplicatedStorage.Shared.Config.Station)
 local Sounds = require(ReplicatedStorage.Shared.Config.SoundLibrary)
 local Net = require(ReplicatedStorage.Shared.Utilities.Net)
 local SettingsStore = require(script.Parent.SettingsStore)
-local HUDController = require(script.Parent.HUDController)
 local CameraController = require(script.Parent.CameraController)
 
 local player = Players.LocalPlayer
 
 local AudioController = {}
+AudioController.Weather = { wind = 0.2, snow = 0.1, state = "Calm" }
+AudioController.Indoors = false
 
 local groups: { [string]: SoundGroup } = {}
-local music: { [string]: Sound } = {}
-local currentTrack: string? = nil
-local creatureState = "Idle"
-local phase = "Idle"
+local music: Sound? = nil
+local musicKey: string? = nil
+local stepT = 0
+local windSound: Sound? = nil
+local creatureState = "None"
+local muffle = 0
 
 local function group(name: string): SoundGroup
-	if groups[name] then
-		return groups[name]
+	local g = groups[name]
+	if g then
+		return g
 	end
-	local g = Instance.new("SoundGroup")
+	g = Instance.new("SoundGroup")
 	g.Name = name
 	g.Parent = SoundService
 	groups[name] = g
 	return g
 end
 
-local function makeMusic(name: string): Sound
-	local def = Sounds[name]
-	local s = Instance.new("Sound")
-	s.Name = name
-	s.SoundId = def.id
-	s.Volume = 0
-	s.Looped = def.looped == true
-	s.PlaybackSpeed = def.pitch or 1
-	s.SoundGroup = group("Music")
-	s.Parent = SoundService
-	s:SetAttribute("TargetVolume", def.volume)
-	return s
-end
-
-local function setTrack(name: string?)
-	if currentTrack == name then
-		return
-	end
-	if currentTrack and music[currentTrack] then
-		local old = music[currentTrack]
-		TweenService:Create(old, TweenInfo.new(1.5), { Volume = 0 }):Play()
-		task.delay(1.6, function()
-			if currentTrack ~= old.Name then
-				old:Stop()
-			end
-		end)
-	end
-	currentTrack = name
-	if name then
-		local s = music[name] or makeMusic(name)
-		music[name] = s
-		if not s.IsPlaying then
-			s:Play()
-		end
-		TweenService:Create(s, TweenInfo.new(2), { Volume = s:GetAttribute("TargetVolume") }):Play()
-	end
-end
-
-local function chooseTrack()
-	if phase == "Idle" then
-		setTrack("MusicLobby")
-	elseif phase == "Results" then
-		setTrack(nil)
-	elseif phase == "Evacuation" and creatureState ~= "Chase" and creatureState ~= "Attack" then
-		setTrack("MusicEvac")
-	elseif creatureState == "Chase" or creatureState == "Attack" then
-		setTrack("MusicChase")
-	elseif creatureState == "Suspicious" or creatureState == "Investigate" or creatureState == "Search" then
-		setTrack("MusicSuspicion")
-	else
-		setTrack("MusicExplore")
-	end
-end
-
 local function applyVolumes()
-	group("Music").Volume = SettingsStore.Current.musicVolume
-	group("SFX").Volume = SettingsStore.Current.sfxVolume
-	group("Ambient").Volume = SettingsStore.Current.ambientVolume
+	local s = SettingsStore.Current
+	group("Music").Volume = s.musicVolume
+	group("SFX").Volume = s.sfxVolume
+	group("Ambient").Volume = s.ambientVolume * (1 - muffle * 0.5)
+	group("Voice").Volume = s.dialogueVolume
 end
 
 local function classify(sound: Sound)
-	if sound.SoundGroup then
+	if sound:IsDescendantOf(SoundService) then
 		return
 	end
-	if sound:GetAttribute("AutoPlay") or sound.Name == "Hum" or sound.Name == "Vent" or sound.Name == "AlarmSound" then
+	local name = sound.Name
+	if sound:GetAttribute("AutoPlay") or name == "Hum" or name == "Vent" or name == "Wind" or name == "GeneratorHum" or name == "ClockTick" then
 		sound.SoundGroup = group("Ambient")
+	elseif name:sub(1, 5) == "Voice" then
+		sound.SoundGroup = group("Voice")
 	else
 		sound.SoundGroup = group("SFX")
 	end
 end
 
-local stepT = 0
-local function footsteps(dt: number)
+local function play(def, name: string?)
+	if not def or not def.id then
+		return nil
+	end
+	local s = Instance.new("Sound")
+	s.Name = name or "Local"
+	s.SoundId = def.id
+	s.Volume = def.volume
+	s.PlaybackSpeed = def.pitch or 1
+	s.SoundGroup = group(if def.category == "music" then "Music" elseif def.category == "ambient" then "Ambient" else "SFX")
+	s.Parent = SoundService
+	s:Play()
+	s.Ended:Once(function()
+		s:Destroy()
+	end)
+	return s
+end
+AudioController.Play = play
+
+-- ===== Footsteps ===========================================================
+
+local function floorKind(): string
 	local char = player.Character
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	if not hum or not hrp then
-		return
+	if not hrp then
+		return "concrete"
 	end
-	local speed = hum.MoveDirection.Magnitude * hum.WalkSpeed
-	if speed < 1 or hum.FloorMaterial == Enum.Material.Air then
-		return
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { char, workspace.CurrentCamera }
+	local hit = workspace:Raycast(hrp.Position, Vector3.new(0, -5, 0), params)
+	if not hit then
+		return "concrete"
 	end
-	stepT += dt * speed
-	local interval = if CameraController.Crouching then 7 else 5.2
-	if stepT >= interval then
-		stepT = 0
-		local metal = hum.FloorMaterial == Enum.Material.Metal or hum.FloorMaterial == Enum.Material.DiamondPlate
-		local def = if metal then Sounds.FootMetal else Sounds.FootConcrete
-		local s = Instance.new("Sound")
-		s.SoundId = def.id
-		s.Volume = def.volume * (if CameraController.Crouching then 0.4 elseif CameraController.Sprinting then 1.3 else 1)
-		s.PlaybackSpeed = (def.pitch or 1) * (0.95 + math.random() * 0.1)
-		s.SoundGroup = group("SFX")
-		s.Parent = hrp
-		s:Play()
-		s.Ended:Once(function()
-			s:Destroy()
-		end)
+	local inst = hit.Instance
+	local kind = inst:GetAttribute("Floor")
+	if not kind and inst.Parent then
+		kind = inst.Parent:GetAttribute("Floor")
+	end
+	if kind then
+		return kind
+	end
+	local m = inst.Material
+	if m == Enum.Material.Snow then
+		return "snow"
+	elseif m == Enum.Material.Ice or m == Enum.Material.Glass then
+		return "ice"
+	elseif m == Enum.Material.DiamondPlate then
+		return "grate"
+	elseif m == Enum.Material.Metal or m == Enum.Material.CorrodedMetal then
+		return "metal"
+	elseif m == Enum.Material.WoodPlanks or m == Enum.Material.Wood then
+		return "wood"
+	end
+	return "concrete"
+end
+
+local footDefs = { metal = Sounds.FootMetal, concrete = Sounds.FootConcrete, grate = Sounds.FootGrate, snow = Sounds.FootSnow, ice = Sounds.FootSnow, wood = Sounds.FootWood }
+
+local function footstep(speed: number)
+	local kind = floorKind()
+	local def = footDefs[kind] or Sounds.FootConcrete
+	local s = play(def, "Foot")
+	if s then
+		local crouch = CameraController.Crouching
+		s.Volume = def.volume * (if crouch then 0.4 else 1) * (if speed > 14 then 1.3 else 1)
+		s.PlaybackSpeed = (def.pitch or 1) * (0.94 + math.random() * 0.12)
 	end
 end
 
-function AudioController.init()
-	group("Music")
-	group("SFX")
-	group("Ambient")
-	applyVolumes()
-	SettingsStore.Changed:Connect(applyVolumes)
-	for _, d in workspace:GetDescendants() do
-		if d:IsA("Sound") then
-			classify(d)
+-- ===== Wind & shelter =======================================================
+
+local function updateWind(dt: number)
+	if not windSound then
+		windSound = Instance.new("Sound")
+		windSound.Name = "LocalWind"
+		windSound.SoundId = Sounds.Wind.id
+		windSound.Looped = true
+		windSound.PlaybackSpeed = Sounds.Wind.pitch or 1
+		windSound.Volume = 0
+		windSound.SoundGroup = group("Ambient")
+		windSound.Parent = SoundService
+		windSound:Play()
+	end
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local indoors = false
+	if hrp then
+		local lp = hrp.Position - GameConfig.World.StationOrigin
+		indoors = Station.zoneAt(lp) ~= nil
+		if not indoors then
+			-- lobby interior check: close to lobby origin and inside the hull box
+			local lo = hrp.Position - GameConfig.World.LobbyOrigin
+			if math.abs(lo.X) < 63 and math.abs(lo.Z) < 44 and lo.Y < 14 and lo.Y > -2 then
+				indoors = true
+			end
 		end
 	end
-	workspace.DescendantAdded:Connect(function(d)
-		if d:IsA("Sound") then
-			classify(d)
+	AudioController.Indoors = indoors
+	local w = AudioController.Weather.wind
+	local target = (0.15 + w * 0.6) * (if indoors then 0.25 else 1)
+	windSound.Volume += (target - windSound.Volume) * math.clamp(dt * 1.5, 0, 1)
+	windSound.PlaybackSpeed = (Sounds.Wind.pitch or 1) * (0.9 + w * 0.35)
+end
+
+-- ===== Music ===================================================================
+
+local function setMusic(key: string?)
+	if musicKey == key then
+		return
+	end
+	musicKey = key
+	local old = music
+	if old then
+		local tw = game:GetService("TweenService"):Create(old, TweenInfo.new(2.5), { Volume = 0 })
+		tw:Play()
+		tw.Completed:Once(function()
+			old:Destroy()
+		end)
+		music = nil
+	end
+	local def = key and Sounds[key]
+	if def and def.id then
+		local s = Instance.new("Sound")
+		s.Name = "Music"
+		s.SoundId = def.id
+		s.Looped = true
+		s.PlaybackSpeed = def.pitch or 1
+		s.Volume = 0
+		s.SoundGroup = group("Music")
+		s.Parent = SoundService
+		s:Play()
+		game:GetService("TweenService"):Create(s, TweenInfo.new(3), { Volume = def.volume }):Play()
+		music = s
+	end
+end
+
+local function chooseMusic(phase: string)
+	if phase == "Idle" then
+		setMusic("MusicLobby")
+	elseif phase ~= "Results" and phase ~= "Boarding" and creatureState == "Chase" then
+		setMusic("MusicChase")
+	elseif phase ~= "Results" and phase ~= "Boarding" and (creatureState == "Stalk" or creatureState == "Observe") then
+		setMusic("MusicStalk")
+	else
+		setMusic(nil) -- silence is the default inside the station
+	end
+end
+
+function AudioController.SetMuffle(amount: number)
+	muffle = math.clamp(amount, 0, 1)
+	applyVolumes()
+end
+
+function AudioController.init()
+	applyVolumes()
+	SettingsStore.Changed:Connect(applyVolumes)
+	for _, s in workspace:GetDescendants() do
+		if s:IsA("Sound") then
+			classify(s)
+		end
+	end
+	workspace.DescendantAdded:Connect(function(inst)
+		if inst:IsA("Sound") then
+			classify(inst)
 		end
 	end)
-	Net.event("CreatureState").OnClientEvent:Connect(function(s)
-		creatureState = s.state
-		chooseTrack()
-	end)
+	local phase = "Idle"
+	local HUDController = require(script.Parent.HUDController)
 	HUDController.PhaseChanged:Connect(function(p)
 		phase = p
-		if p == "Idle" or p == "Prep" then
-			creatureState = "Idle"
-		end
+		chooseMusic(phase)
 		if p == "Results" then
-			local s = Instance.new("Sound")
-			s.SoundId = Sounds.MusicResult.id
-			s.Volume = Sounds.MusicResult.volume
-			s.SoundGroup = group("Music")
-			s.Parent = SoundService
-			s:Play()
-			s.Ended:Once(function()
-				s:Destroy()
-			end)
+			play(Sounds.MusicResult, "Stinger")
 		end
-		chooseTrack()
 	end)
-	chooseTrack()
-	game:GetService("RunService").Heartbeat:Connect(footsteps)
+	Net.event("CreatureState").OnClientEvent:Connect(function(c)
+		creatureState = c.state or "None"
+		chooseMusic(phase)
+		if creatureState == "Chase" then
+			play(Sounds.GuestNotice, "Notice")
+		end
+	end)
+	Net.event("WeatherState").OnClientEvent:Connect(function(w)
+		AudioController.Weather = { wind = w.wind or 0.2, snow = w.snow or 0.1, state = w.state }
+	end)
+	chooseMusic("Idle")
+	RunService.Heartbeat:Connect(function(dt)
+		updateWind(dt)
+		local char = player.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not hum or CameraController.CinematicActive then
+			return
+		end
+		local speed = hum.MoveDirection.Magnitude * hum.WalkSpeed
+		if speed > 0.5 and hum.FloorMaterial ~= Enum.Material.Air then
+			stepT += dt * speed
+			local stride = if CameraController.Crouching then 7 else 5.2
+			if stepT >= stride then
+				stepT = 0
+				footstep(speed)
+			end
+		else
+			stepT = math.min(stepT, 2)
+		end
+	end)
 end
 
 return AudioController

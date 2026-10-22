@@ -7,7 +7,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
-local Missions = require(ReplicatedStorage.Shared.Config.Missions)
+local Chapters = require(ReplicatedStorage.Shared.Config.Chapters)
 local Documents = require(ReplicatedStorage.Shared.Config.Documents)
 local Tools = require(ReplicatedStorage.Shared.Config.Tools)
 local Net = require(ReplicatedStorage.Shared.Utilities.Net)
@@ -22,6 +22,11 @@ export type Settings = {
 	cameraShake: number,
 	subtitles: boolean,
 	effectsQuality: number,
+	dialogueVolume: number,
+	particles: number,
+	frost: boolean,
+	postFx: number,
+	breath: boolean,
 }
 
 export type Profile = {
@@ -32,9 +37,11 @@ export type Profile = {
 	currency: number,
 	cosmetics: { [string]: boolean },
 	settings: Settings,
-	stats: { shifts: number, successes: number, documentsFound: number, rescues: number },
+	stats: { shifts: number, successes: number, documentsFound: number, rescues: number, nightsSurvived: number },
 	selectedTool: string,
 	grantTokens: { [string]: number },
+	introSeen: boolean,
+	cosmeticsEquipped: { [string]: string },
 	transient: boolean?,
 }
 
@@ -47,6 +54,11 @@ local DEFAULT_SETTINGS: Settings = {
 	cameraShake = 0.6,
 	subtitles = true,
 	effectsQuality = 2,
+	dialogueVolume = 1,
+	particles = 2,
+	frost = true,
+	postFx = 1,
+	breath = true,
 }
 
 local PlayerDataService = {}
@@ -55,7 +67,7 @@ PlayerDataService.ProfileChanged = Signal.new() :: Signal.Signal<Player, Profile
 local profiles: { [Player]: Profile } = {}
 local dirty: { [Player]: boolean } = {}
 local store: DataStore? = nil
-local STORE_NAME = "NightShiftProfiles_v" .. GameConfig.DataVersion
+local STORE_NAME = "Vostok9Profiles_v" .. GameConfig.DataVersion
 local MAX_HISTORY = 20
 
 local function defaultProfile(): Profile
@@ -67,9 +79,11 @@ local function defaultProfile(): Profile
 		currency = 0,
 		cosmetics = {},
 		settings = table.clone(DEFAULT_SETTINGS),
-		stats = { shifts = 0, successes = 0, documentsFound = 0, rescues = 0 },
+		stats = { shifts = 0, successes = 0, documentsFound = 0, rescues = 0, nightsSurvived = 0 },
 		selectedTool = "Multimeter",
 		grantTokens = {},
+		introSeen = false,
+		cosmeticsEquipped = {},
 	}
 end
 
@@ -91,6 +105,11 @@ function PlayerDataService.sanitizeSettings(raw: any): Settings
 		cameraShake = clampNumber(s.cameraShake, 0, 1, DEFAULT_SETTINGS.cameraShake),
 		subtitles = if typeof(s.subtitles) == "boolean" then s.subtitles else DEFAULT_SETTINGS.subtitles,
 		effectsQuality = math.floor(clampNumber(s.effectsQuality, 0, 2, DEFAULT_SETTINGS.effectsQuality)),
+		dialogueVolume = clampNumber(s.dialogueVolume, 0, 1, DEFAULT_SETTINGS.dialogueVolume),
+		particles = math.floor(clampNumber(s.particles, 0, 2, DEFAULT_SETTINGS.particles)),
+		frost = if typeof(s.frost) == "boolean" then s.frost else DEFAULT_SETTINGS.frost,
+		postFx = clampNumber(s.postFx, 0, 1, DEFAULT_SETTINGS.postFx),
+		breath = if typeof(s.breath) == "boolean" then s.breath else DEFAULT_SETTINGS.breath,
 	}
 end
 
@@ -111,7 +130,7 @@ local function migrate(raw: any): Profile
 	if typeof(raw.chaptersUnlocked) == "table" then
 		for idx, v in raw.chaptersUnlocked do
 			local n = tonumber(idx)
-			if n and Missions.Chapters[n] and v == true then
+			if n and Chapters.ByIndex[n] and v == true then
 				p.chaptersUnlocked[n] = true
 			end
 		end
@@ -145,6 +164,14 @@ local function migrate(raw: any): Profile
 	end
 	if typeof(raw.selectedTool) == "string" and Tools.Defs[raw.selectedTool] then
 		p.selectedTool = raw.selectedTool
+	end
+	p.introSeen = raw.introSeen == true
+	if typeof(raw.cosmeticsEquipped) == "table" then
+		for slot, id in raw.cosmeticsEquipped do
+			if typeof(slot) == "string" and typeof(id) == "string" and #id < 48 then
+				p.cosmeticsEquipped[slot] = id
+			end
+		end
 	end
 	if typeof(raw.grantTokens) == "table" then
 		local count = 0
@@ -301,18 +328,18 @@ function PlayerDataService.CheckChapterUnlocks(player: Player)
 	local completed = {}
 	for _, h in p.shiftHistory do
 		if h.success then
-			local m = Missions.Defs[h.missionId]
+			local m = Chapters.Shifts[h.missionId]
 			if m then
 				completed[m.chapter] = true
 			end
 		end
 	end
-	for _, ch in Missions.Chapters do
+	for _, ch in Chapters.List do
 		if p.chaptersUnlocked[ch.index] then
 			continue
 		end
 		local req = ch.unlockRequires
-		if docs >= req.documents and (req.chapter == nil or completed[req.chapter]) and #ch.missions > 0 then
+		if docs >= req.documents and (req.chapter == nil or completed[req.chapter]) and #ch.shifts > 0 then
 			PlayerDataService.Update(player, function(prof)
 				prof.chaptersUnlocked[ch.index] = true
 			end)
@@ -366,7 +393,7 @@ end
 
 function PlayerDataService.IsMissionAvailable(player: Player, missionId: string): boolean
 	local p = profiles[player]
-	local m = Missions.Defs[missionId]
+	local m = Chapters.Shifts[missionId]
 	if not p or not m then
 		return false
 	end
@@ -390,6 +417,12 @@ local function onPlayerRemoving(player: Player)
 	if p then
 		save(player, p)
 	end
+end
+
+function PlayerDataService.MarkIntroSeen(player: Player)
+	PlayerDataService.Update(player, function(prof)
+		prof.introSeen = true
+	end)
 end
 
 function PlayerDataService.Init()

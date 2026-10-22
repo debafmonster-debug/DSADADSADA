@@ -1,5 +1,6 @@
 --!nonstrict
--- Server entry point. Order matters: data first, then world, then gameplay.
+-- Server entry point. Order matters: data first, then world systems, then
+-- gameplay, then the lobby that depends on all of them.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local StarterPlayer = game:GetService("StarterPlayer")
@@ -13,16 +14,27 @@ Net.event("ClientReady")
 local Services = script.Parent.Services
 local order = {
 	"PlayerDataService",
+	"ClockService",
+	"WeatherService",
 	"FacilityService",
+	"PowerGridService",
+	"NoiseDirector",
+	"TemperatureService",
 	"CreatureService",
 	"RescueService",
-	"TaskService",
-	"StoryService",
+	"IdentityService",
 	"EquipmentService",
+	"TaskService",
+	"WarehouseService",
+	"BunkerService",
 	"CommunicationService",
+	"StoryService",
+	"EventDirector",
+	"FootprintService",
 	"RoundManager",
-	"MatchmakingService",
+	"RoomService",
 	"LobbyService",
+	"CinematicService",
 	"DebugService",
 }
 
@@ -57,10 +69,12 @@ for _, name in order do
 	end
 end
 
--- Clients announce readiness; reply with the current shift list and profile.
+-- Clients announce readiness; reply with the current room list and world state.
 Net.event("ClientReady").OnServerEvent:Connect(function(player)
-	local Matchmaking = loaded.MatchmakingService
-	Net.event("ShiftListUpdated"):FireClient(player, { shifts = Matchmaking.List(player), mine = nil })
+	Net.event("RoomListUpdated"):FireClient(player, { rooms = loaded.RoomService.List(player), mine = nil })
+	Net.event("WeatherState"):FireClient(player, loaded.WeatherService.Snapshot())
+	Net.event("ClockState"):FireClient(player, loaded.ClockService.Snapshot())
+	Net.event("PowerState"):FireClient(player, loaded.PowerGridService.Snapshot())
 end)
 
-print(string.format("[NightShift] %s v%s server ready (teleport mode: %s)", GameConfig.GameName, GameConfig.Version, tostring(GameConfig.UseTeleportForShifts)))
+print(string.format("[Vostok9] %s v%s server ready (teleport: %s)", GameConfig.GameName, GameConfig.Version, tostring(GameConfig.UseTeleportForShifts)))

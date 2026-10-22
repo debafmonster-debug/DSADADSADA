@@ -9,18 +9,21 @@ local TweenService = game:GetService("TweenService")
 
 local Theme = {}
 
+-- Cold, restrained palette: near-black panels, pale ice accent, one warm
+-- orange reserved for the station hull colour, red only for danger.
 Theme.Colors = {
-	Bg = Color3.fromRGB(12, 14, 17),
-	Panel = Color3.fromRGB(20, 23, 27),
-	PanelAlt = Color3.fromRGB(28, 32, 37),
-	Border = Color3.fromRGB(70, 78, 86),
-	Text = Color3.fromRGB(222, 226, 230),
-	TextDim = Color3.fromRGB(150, 158, 166),
-	Accent = Color3.fromRGB(235, 190, 50),
-	Danger = Color3.fromRGB(220, 60, 50),
-	Good = Color3.fromRGB(90, 210, 130),
-	Info = Color3.fromRGB(90, 160, 230),
-	Terminal = Color3.fromRGB(120, 220, 170),
+	Bg = Color3.fromRGB(10, 12, 16),
+	Panel = Color3.fromRGB(16, 19, 24),
+	PanelAlt = Color3.fromRGB(24, 28, 35),
+	Border = Color3.fromRGB(62, 72, 84),
+	Text = Color3.fromRGB(220, 226, 232),
+	TextDim = Color3.fromRGB(138, 150, 164),
+	Accent = Color3.fromRGB(150, 198, 228),
+	Warm = Color3.fromRGB(214, 140, 72),
+	Danger = Color3.fromRGB(214, 62, 52),
+	Good = Color3.fromRGB(112, 196, 150),
+	Info = Color3.fromRGB(110, 160, 210),
+	Terminal = Color3.fromRGB(150, 210, 190),
 }
 Theme.Font = Enum.Font.Gotham
 Theme.FontBold = Enum.Font.GothamBold
@@ -257,6 +260,89 @@ function Theme.playUISound(name: string)
 	end)
 end
 Theme.sfxVolume = 1
+
+-- Full-screen black fade used by cinematics and transitions. Returns the frame.
+function Theme.fade(order: number?): Frame
+	local gui = Theme.screen("V9_Fade", order or 100, true)
+	local f = Theme.frame(gui, { BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 1, Name = "Fade" })
+	f.Active = false
+	return f
+end
+
+function Theme.fadeTo(frame: Frame, transparency: number, seconds: number)
+	local tw = TweenService:Create(frame, TweenInfo.new(seconds, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), { BackgroundTransparency = transparency })
+	tw:Play()
+	return tw
+end
+
+-- Horizontal slider with −/+ nudges; `onChange(value)` receives 0..1 values.
+function Theme.slider(parent: Instance, labelText: string, value: number, onChange: (number) -> ()): Frame
+	local row = Theme.frame(parent, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 44) })
+	Theme.label(row, labelText, 13, { TextColor3 = Theme.Colors.TextDim, Size = UDim2.new(1, 0, 0, 16) })
+	local track = Theme.frame(row, { Position = UDim2.new(0, 30, 0, 24), Size = UDim2.new(1, -60, 0, 8), BackgroundColor3 = Theme.Colors.PanelAlt })
+	Theme.corner(track, 4)
+	local fill = Theme.frame(track, { Size = UDim2.new(math.clamp(value, 0, 1), 0, 1, 0), BackgroundColor3 = Theme.Colors.Accent })
+	Theme.corner(fill, 4)
+	local knob = Theme.frame(track, { Size = UDim2.new(0, 14, 0, 18), Position = UDim2.new(math.clamp(value, 0, 1), -7, 0.5, -9), BackgroundColor3 = Theme.Colors.Text })
+	Theme.corner(knob, 3)
+	local current = value
+	local function set(v: number)
+		current = math.clamp(v, 0, 1)
+		fill.Size = UDim2.new(current, 0, 1, 0)
+		knob.Position = UDim2.new(current, -7, 0.5, -9)
+		onChange(current)
+	end
+	local dragging = false
+	local function fromInput(x: number)
+		local rel = (x - track.AbsolutePosition.X) / math.max(1, track.AbsoluteSize.X)
+		set(rel)
+	end
+	track.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			fromInput(input.Position.X)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			fromInput(input.Position.X)
+		end
+	end)
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+	Theme.button(row, "−", function()
+		set(current - 0.1)
+	end, { Size = UDim2.new(0, 24, 0, 24), Position = UDim2.new(0, 0, 0, 16), TextSize = 14 })
+	Theme.button(row, "+", function()
+		set(current + 0.1)
+	end, { Size = UDim2.new(0, 24, 0, 24), Position = UDim2.new(1, -24, 0, 16), TextSize = 14 })
+	return row
+end
+
+function Theme.toggle(parent: Instance, labelText: string, value: boolean, onChange: (boolean) -> ()): TextButton
+	local b
+	local function text()
+		return (if value then "■ " else "□ ") .. labelText
+	end
+	b = Theme.button(parent, text(), function()
+		value = not value
+		b.Text = text()
+		onChange(value)
+	end, { TextXAlignment = Enum.TextXAlignment.Left })
+	Theme.padding(b, 8)
+	return b
+end
+
+-- Thin progress bar: returns the fill frame to resize.
+function Theme.bar(parent: Instance, labelText: string, color: Color3, y: number, width: number?): (Frame, TextLabel)
+	local l = Theme.label(parent, labelText, 11, { TextColor3 = Theme.Colors.TextDim, Position = UDim2.new(0, 0, 0, y), Size = UDim2.new(0, width or 200, 0, 14) })
+	local track = Theme.frame(parent, { Position = UDim2.new(0, 0, 0, y + 15), Size = UDim2.new(0, width or 200, 0, 6), BackgroundColor3 = Theme.Colors.PanelAlt })
+	local fill = Theme.frame(track, { Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = color })
+	return fill, l
+end
 
 function Theme.safeTop(): number
 	local inset = GuiService:GetGuiInset()

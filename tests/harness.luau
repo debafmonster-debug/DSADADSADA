@@ -9,7 +9,7 @@ local task = require("@lune/task")
 
 local Harness = {}
 
-local PLACE = "build/NightShift.rbxl"
+local PLACE = "build/Vostok9.rbxl"
 
 local function fakeSignal()
 	local handlers = {}
@@ -130,6 +130,28 @@ function Harness.load()
 		moduleEnv.script = inst
 		local fn = luau.load(src, { debugName = inst:GetFullName(), environment = moduleEnv })
 		local result = fn()
+		-- Remotes cannot fire in Lune: wrap Net so handlers bind to fakes.
+		if inst.Name == "Net" and inst.Parent and inst.Parent.Name == "Utilities" then
+			local fakes = {}
+			local function fake(name)
+				if not fakes[name] then
+					fakes[name] = {
+						Name = name,
+						FireAllClients = function() end,
+						FireClient = function() end,
+						FireServer = function() end,
+						OnServerEvent = fakeSignal(),
+						OnClientEvent = fakeSignal(),
+						OnServerInvoke = nil,
+						InvokeServer = function() end,
+					}
+				end
+				return fakes[name]
+			end
+			result.event = fake
+			result.func = fake
+			result._fakes = fakes
+		end
 		cache[inst] = result
 		return result
 	end

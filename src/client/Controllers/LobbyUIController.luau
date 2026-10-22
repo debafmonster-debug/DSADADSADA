@@ -1,47 +1,26 @@
 --!nonstrict
--- Lobby screens: shift board, equipment, briefing, archive, registration.
+-- Lobby screens: room board (create / find / join by code / ready / start),
+-- equipment picker, briefing, archive and the registration profile. All
+-- actions go through RemoteFunctions and surface server errors verbatim.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Tools = require(ReplicatedStorage.Shared.Config.Tools)
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
+local Tools = require(ReplicatedStorage.Shared.Config.Tools)
 local Net = require(ReplicatedStorage.Shared.Utilities.Net)
 local Theme = require(script.Parent.Parent.UI.Theme)
-local InteractionController = require(script.Parent.InteractionController)
-local HUDController = require(script.Parent.HUDController)
 local CameraController = require(script.Parent.CameraController)
+local HUDController = require(script.Parent.HUDController)
+local InteractionController = require(script.Parent.InteractionController)
 
 local player = Players.LocalPlayer
-local C = Theme.Colors
 
 local LobbyUIController = {}
 
 local gui: ScreenGui? = nil
-local shiftList = { shifts = {}, mine = nil }
-local missionsCache = nil
-local boardRefresh: (() -> ())? = nil
-
-local function open(title: string, w: number, h: number): Frame
-	LobbyUIController.close()
-	local g = Theme.screen("NS_Lobby", 40)
-	gui = g
-	local body = Theme.modal(g, title, w, h, function()
-		gui = nil
-		boardRefresh = nil
-		CameraController.InputLocked = false
-	end)
-	CameraController.InputLocked = true
-	return body
-end
-
-function LobbyUIController.close()
-	if gui then
-		gui:Destroy()
-		gui = nil
-	end
-	boardRefresh = nil
-	CameraController.InputLocked = false
-end
+local currentScreen: string? = nil
+local roomsCache = { rooms = {}, mine = nil }
+local shiftsCache = nil
 
 local function call(name: string, ...)
 	local ok, res = pcall(function(...)
@@ -52,346 +31,377 @@ local function call(name: string, ...)
 		return nil
 	end
 	if typeof(res) == "table" and res.ok == false then
-		HUDController.Notify({ title = "Отказано", text = tostring(res.reason), kind = "warn" })
+		HUDController.Notify({ title = "Отказ", text = res.reason or "", kind = "warn" })
 		return nil
 	end
 	return res
 end
 
-------------------------------------------------------------------------------
-local function shiftBoard()
-	local body = open("Доска смен", 820, 520)
+local function close()
+	if gui then
+		gui:Destroy()
+		gui = nil
+	end
+	currentScreen = nil
+	CameraController.Unlock("lobbyui")
+end
+LobbyUIController.Close = close
+
+local function open(title: string, w: number, h: number): Frame
+	close()
+	gui = Theme.screen("V9_Lobby", 40)
+	CameraController.Lock("lobbyui")
+	local body = Theme.modal(gui, title, w, h, close)
+	return body
+end
+
+-- ===== Room board ============================================================
+
+local function shiftList()
+	if not shiftsCache then
+		local res = call("TerminalQuery", "shifts")
+		shiftsCache = res and res.data or {}
+	end
+	return shiftsCache
+end
+
+local function renderBoard(body: Frame)
+	for _, c in body:GetChildren() do
+		if not c:IsA("UIPadding") then
+			c:Destroy()
+		end
+	end
 	local left = Theme.frame(body, { Size = UDim2.new(0.5, -8, 1, 0), BackgroundTransparency = 1 })
 	local right = Theme.frame(body, { Position = UDim2.new(0.5, 8, 0, 0), Size = UDim2.new(0.5, -8, 1, 0), BackgroundTransparency = 1 })
-	local leftScroll = Theme.scroll(left)
-	Theme.list(leftScroll, 6)
-	local rightScroll = Theme.scroll(right)
-	Theme.list(rightScroll, 6)
-
-	local function render()
-		for _, ch in leftScroll:GetChildren() do
-			if ch:IsA("GuiObject") then
-				ch:Destroy()
-			end
-		end
-		for _, ch in rightScroll:GetChildren() do
-			if ch:IsA("GuiObject") then
-				ch:Destroy()
-			end
-		end
-		local mine = nil
-		for _, s in shiftList.shifts do
-			if s.id == shiftList.mine then
-				mine = s
-			end
-		end
-		if mine then
-			Theme.header(leftScroll, "Ваша смена")
-			Theme.label(leftScroll, mine.title, 16, { Font = Theme.FontBold })
-			Theme.label(leftScroll, string.format("%s · %s", mine.kind, mine.danger), 13, { TextColor3 = C.TextDim })
-			Theme.label(leftScroll, string.format("Создатель: %s · %s · код: <b>%s</b>", mine.hostName, if mine.private then "приватная" else "публичная", mine.id), 13, { TextColor3 = C.TextDim })
-			Theme.header(leftScroll, "Команда " .. mine.count .. "/" .. mine.max)
-			local me = nil
-			for _, m in mine.players do
-				if m.userId == player.UserId then
-					me = m
-				end
-				local toolName = Tools.Defs[m.tool] and Tools.Defs[m.tool].name or m.tool
-				Theme.label(leftScroll, string.format("%s %s  <font color='#969ea6'>%s</font>", if m.ready then "■" else "□", m.name, toolName), 14, { TextColor3 = if m.ready then C.Good else C.Text })
-			end
-			Theme.button(leftScroll, if me and me.ready then "ОТМЕНИТЬ ГОТОВНОСТЬ" else "Я ГОТОВ", function()
-				call("ShiftReady", not (me and me.ready))
-			end)
-			if mine.hostId == player.UserId then
-				Theme.button(leftScroll, "НАЧАТЬ СМЕНУ", function()
-					if call("ShiftStart") then
-						LobbyUIController.close()
-					end
-				end, { BackgroundColor3 = Color3.fromRGB(60, 50, 20) })
-			end
-			Theme.button(leftScroll, "ПОКИНУТЬ СМЕНУ", function()
-				call("ShiftLeave")
-			end)
-		else
-			Theme.header(leftScroll, "Открытые смены")
-			local any = false
-			for _, s in shiftList.shifts do
-				any = true
-				local card = Theme.frame(leftScroll, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.Panel })
-				Theme.stroke(card)
-				Theme.corner(card)
-				Theme.padding(card, 8)
-				Theme.list(card, 3)
-				Theme.label(card, s.title, 14, { Font = Theme.FontBold })
-				Theme.label(card, string.format("%s · %s · %d/%d · %s", s.kind, s.danger, s.count, s.max, s.state), 12, { TextColor3 = C.TextDim })
-				if s.state == "open" then
-					Theme.button(card, "ПРИСОЕДИНИТЬСЯ", function()
-						call("ShiftJoin", s.id)
-					end)
-				end
-			end
-			if not any then
-				Theme.label(leftScroll, "Открытых смен нет. Создайте свою или введите код приватной смены.", 13, { TextColor3 = C.TextDim, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-			end
-			local codeBox = Instance.new("TextBox")
-			codeBox.PlaceholderText = "Код приватной смены"
-			codeBox.Text = ""
-			codeBox.Size = UDim2.new(1, 0, 0, 34)
-			codeBox.BackgroundColor3 = C.Panel
-			codeBox.TextColor3 = C.Text
-			codeBox.Font = Theme.FontMono
-			codeBox.TextSize = 14
-			codeBox.ClearTextOnFocus = false
-			Theme.stroke(codeBox)
-			Theme.corner(codeBox)
-			codeBox.Parent = leftScroll
-			Theme.button(leftScroll, "ВОЙТИ ПО КОДУ", function()
-				if #codeBox.Text > 0 then
-					call("ShiftJoin", codeBox.Text)
-				end
-			end)
-		end
-		-- Right: missions
-		Theme.header(rightScroll, "Создать смену")
-		if not missionsCache then
-			missionsCache = call("TerminalQuery", "missions")
-			missionsCache = missionsCache and missionsCache.data
-		end
-		local privateFlag = { value = false }
-		local privBtn
-		privBtn = Theme.button(rightScroll, "□ Приватная смена (для друзей)", function()
-			privateFlag.value = not privateFlag.value
-			privBtn.Text = (privateFlag.value and "■" or "□") .. " Приватная смена (для друзей)"
-		end)
-		for _, m in missionsCache or {} do
-			local card = Theme.frame(rightScroll, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.Panel })
-			Theme.stroke(card, if m.available then C.Border else Color3.fromRGB(50, 40, 40))
-			Theme.corner(card)
-			Theme.padding(card, 8)
-			Theme.list(card, 3)
-			Theme.label(card, m.title, 14, { Font = Theme.FontBold, TextColor3 = if m.available then C.Text else C.TextDim })
-			Theme.label(card, m.chapterTitle, 12, { TextColor3 = C.TextDim })
-			Theme.label(card, string.format("%s · опасность: %s", m.kind, m.danger), 12, { TextColor3 = C.TextDim })
-			Theme.label(card, "Цель: " .. m.mainTask, 12, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-			if m.available and not mine then
-				Theme.button(card, "СОЗДАТЬ", function()
-					call("ShiftCreate", m.id, privateFlag.value)
-				end)
-			elseif not m.available then
-				Theme.label(card, "Недоступно: глава не открыта", 12, { TextColor3 = C.Danger })
-			end
+	local mine = nil
+	for _, r in roomsCache.rooms do
+		if r.id == roomsCache.mine then
+			mine = r
 		end
 	end
-	boardRefresh = render
-	render()
-	local list = call("ShiftList")
-	if list then
-		shiftList = list
-		render()
+	-- Left: my room or the open-room list.
+	local ls = Theme.scroll(left)
+	Theme.list(ls, 6)
+	if mine then
+		Theme.header(ls, "Моя комната: " .. mine.name)
+		Theme.label(ls, string.format("%s · %s · %d/%d · %s", mine.title, mine.kind, mine.count, mine.max, if mine.private then "приватная" else "открытая"), 12, { TextColor3 = Theme.Colors.TextDim })
+		if mine.code then
+			Theme.label(ls, "Код приглашения: " .. mine.code, 14, { Font = Theme.FontMono, TextColor3 = Theme.Colors.Accent })
+		end
+		Theme.header(ls, "Состав")
+		local meReady = false
+		for _, m in mine.players do
+			local tool = Tools.Defs[m.tool]
+			Theme.label(ls, string.format("%s %s — %s%s", if m.ready then "■" else "□", m.name, tool and tool.name or "?", if m.userId == mine.hostId then " (создатель)" else ""), 13)
+			if m.userId == player.UserId then
+				meReady = m.ready
+			end
+		end
+		Theme.button(ls, if meReady then "ОТМЕНИТЬ ГОТОВНОСТЬ" else "Я ГОТОВ", function()
+			call("RoomReady", not meReady)
+		end)
+		if mine.hostId == player.UserId then
+			Theme.button(ls, "НАЧАТЬ ЭКСПЕДИЦИЮ", function()
+				if call("RoomStart") then
+					close()
+				end
+			end, { BackgroundColor3 = Theme.Colors.PanelAlt, TextColor3 = Theme.Colors.Good })
+		end
+		Theme.button(ls, "ПОКИНУТЬ КОМНАТУ", function()
+			call("RoomLeave")
+		end)
+	else
+		Theme.header(ls, "Открытые комнаты")
+		if #roomsCache.rooms == 0 then
+			Theme.label(ls, "Пока никого. Создайте комнату или введите код друга.", 13, { TextColor3 = Theme.Colors.TextDim })
+		end
+		for _, r in roomsCache.rooms do
+			local card = Theme.frame(ls, { Size = UDim2.new(1, 0, 0, 72), BackgroundColor3 = Theme.Colors.PanelAlt })
+			Theme.corner(card, 3)
+			Theme.padding(card, 8)
+			Theme.label(card, r.name, 14, { Font = Theme.FontBold })
+			Theme.label(card, string.format("%s · %d/%d · %s · %s", r.title, r.count, r.max, r.hostName, if r.state == "open" then "набор" else "в пути"), 12, { Position = UDim2.new(0, 0, 0, 20), TextColor3 = Theme.Colors.TextDim })
+			Theme.button(card, "ВОЙТИ", function()
+				call("RoomJoin", r.id)
+			end, { Position = UDim2.new(1, -90, 0, 32), Size = UDim2.new(0, 90, 0, 26), TextSize = 13 })
+		end
+		Theme.header(ls, "Присоединиться к другу")
+		local codeBox = Instance.new("TextBox")
+		codeBox.PlaceholderText = "КОД КОМНАТЫ"
+		codeBox.Text = ""
+		codeBox.Size = UDim2.new(1, 0, 0, 34)
+		codeBox.BackgroundColor3 = Theme.Colors.PanelAlt
+		codeBox.TextColor3 = Theme.Colors.Text
+		codeBox.Font = Theme.FontMono
+		codeBox.TextSize = 16
+		codeBox.ClearTextOnFocus = false
+		codeBox.Parent = ls
+		Theme.corner(codeBox, 3)
+		Theme.button(ls, "ВОЙТИ ПО КОДУ", function()
+			if #codeBox.Text >= 4 then
+				call("RoomJoin", string.upper(codeBox.Text))
+			end
+		end)
+		Theme.button(ls, "БЫСТРАЯ ИГРА", function()
+			for _, r in roomsCache.rooms do
+				if r.state == "open" and r.count < r.max then
+					call("RoomJoin", r.id)
+					return
+				end
+			end
+			-- Nobody to join: open a public room for the first chapter shift.
+			local shifts = shiftList()
+			local first = shifts[1]
+			if first then
+				call("RoomCreate", player.DisplayName, 4, false, first.id)
+			end
+		end)
+	end
+	-- Right: create a room.
+	local rs = Theme.scroll(right)
+	Theme.list(rs, 6)
+	Theme.header(rs, "Создать комнату")
+	local nameBox = Instance.new("TextBox")
+	nameBox.PlaceholderText = "Название комнаты"
+	nameBox.Text = "Смена " .. player.DisplayName
+	nameBox.Size = UDim2.new(1, 0, 0, 34)
+	nameBox.BackgroundColor3 = Theme.Colors.PanelAlt
+	nameBox.TextColor3 = Theme.Colors.Text
+	nameBox.Font = Theme.Font
+	nameBox.TextSize = 14
+	nameBox.ClearTextOnFocus = false
+	nameBox.Parent = rs
+	Theme.corner(nameBox, 3)
+	local maxPlayers = GameConfig.MaxShiftPlayers
+	local private = false
+	local maxLabel
+	local function maxText()
+		return "Участников: " .. tostring(maxPlayers) .. "   [−] [+]"
+	end
+	local row = Theme.frame(rs, { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1 })
+	maxLabel = Theme.label(row, maxText(), 13, { Size = UDim2.new(1, -70, 1, 0), TextYAlignment = Enum.TextYAlignment.Center })
+	Theme.button(row, "−", function()
+		maxPlayers = math.max(1, maxPlayers - 1)
+		maxLabel.Text = maxText()
+	end, { Position = UDim2.new(1, -66, 0, 2), Size = UDim2.new(0, 30, 0, 26) })
+	Theme.button(row, "+", function()
+		maxPlayers = math.min(4, maxPlayers + 1)
+		maxLabel.Text = maxText()
+	end, { Position = UDim2.new(1, -32, 0, 2), Size = UDim2.new(0, 30, 0, 26) })
+	Theme.toggle(rs, "Приватная (вход по коду)", false, function(v)
+		private = v
+	end)
+	Theme.header(rs, "Смена")
+	local selected = nil
+	local buttons = {}
+	local function refreshSel()
+		for id, b in buttons do
+			b.TextColor3 = if id == selected then Theme.Colors.Accent else Theme.Colors.Text
+		end
+	end
+	for _, s in shiftList() do
+		local b = Theme.button(rs, string.format("%s%s — %s (%s)", if s.available then "" else "🔒 ", s.title, s.kind, s.danger), function()
+			if s.available then
+				selected = s.id
+				refreshSel()
+			end
+		end, { TextXAlignment = Enum.TextXAlignment.Left, TextSize = 13 })
+		Theme.padding(b, 8)
+		buttons[s.id] = b
+		if not selected and s.available then
+			selected = s.id
+		end
+	end
+	refreshSel()
+	Theme.button(rs, "СОЗДАТЬ", function()
+		if not selected then
+			return
+		end
+		local res = call("RoomCreate", nameBox.Text, maxPlayers, private, selected)
+		if res then
+			Theme.playUISound("UIConfirm")
+		end
+	end, { TextColor3 = Theme.Colors.Good })
+end
+
+local function openBoard()
+	local body = open("Доска смен · комнаты экспедиций", 860, 540)
+	currentScreen = "RoomBoard"
+	local res = call("RoomList")
+	if res then
+		roomsCache = res
+	end
+	renderBoard(body)
+end
+
+-- ===== Equipment ==============================================================
+
+local function openEquipment(prompt)
+	local body = open("Экипировочная · выбор инструмента", 620, 440)
+	currentScreen = "Equipment"
+	local scroll = Theme.scroll(body)
+	Theme.list(scroll, 8)
+	Theme.label(scroll, "Один инструмент на смену. Фонарь выдаётся каждому. Аккумуляторы, предохранители и аптечки — на станции.", 13, { TextColor3 = Theme.Colors.TextDim, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0) })
+	local focus = prompt and prompt:GetAttribute("ToolId")
+	for _, id in Tools.Order do
+		local def = Tools.Defs[id]
+		local card = Theme.frame(scroll, { Size = UDim2.new(1, 0, 0, 86), BackgroundColor3 = Theme.Colors.PanelAlt })
+		Theme.corner(card, 3)
+		Theme.padding(card, 10)
+		if id == focus then
+			Theme.stroke(card, Theme.Colors.Accent)
+		end
+		local sw = Theme.frame(card, { Size = UDim2.new(0, 14, 0, 14), BackgroundColor3 = def.color })
+		Theme.corner(sw, 2)
+		Theme.label(card, def.name, 15, { Position = UDim2.new(0, 22, 0, -2), Font = Theme.FontBold })
+		Theme.label(card, def.description, 12, { Position = UDim2.new(0, 0, 0, 22), Size = UDim2.new(1, -110, 0, 44), TextColor3 = Theme.Colors.TextDim })
+		Theme.button(card, "ВЫБРАТЬ", function()
+			if call("SelectTool", id) then
+				HUDController.Notify({ title = "Инструмент выбран", text = def.name, kind = "good" })
+				close()
+			end
+		end, { Position = UDim2.new(1, -100, 1, -30), Size = UDim2.new(0, 100, 0, 28), TextSize = 13 })
 	end
 end
 
-------------------------------------------------------------------------------
-local function equipment(prompt: ProximityPrompt)
-	local toolId = prompt:GetAttribute("ToolId")
-	local def = Tools.Defs[toolId]
-	if not def then
+-- ===== Briefing ================================================================
+
+local function openBriefing()
+	local body = open("Брифинговая · доска задач", 720, 520)
+	currentScreen = "Briefing"
+	local res = call("TerminalQuery", "briefing")
+	if not res then
 		return
 	end
-	local body = open("Экипировка · " .. def.name, 480, 300)
-	Theme.list(body, 8)
-	local sw = Theme.frame(body, { Size = UDim2.new(1, 0, 0, 6), BackgroundColor3 = def.color })
-	sw.Name = "Swatch"
-	Theme.label(body, def.description, 15, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-	local caps = {}
-	for cap in def.capabilities do
-		table.insert(caps, cap)
-	end
-	table.sort(caps)
-	Theme.label(body, "Возможности: " .. table.concat(caps, ", "), 12, { TextColor3 = C.TextDim })
-	Theme.label(body, "Один инструмент на смену. Инструменты не являются оружием.", 12, { TextColor3 = C.TextDim })
-	Theme.button(body, "ВЗЯТЬ " .. string.upper(def.name), function()
-		if call("SelectTool", toolId) then
-			LobbyUIController.close()
+	local scroll = Theme.scroll(body)
+	Theme.list(scroll, 8)
+	for _, s in res.data.shifts do
+		Theme.header(scroll, s.title .. " · " .. s.kind .. " · " .. s.danger)
+		for _, line in s.briefing do
+			Theme.label(scroll, line, 13, { AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0) })
 		end
-	end, { BackgroundColor3 = Color3.fromRGB(40, 50, 30) })
+		for _, t in s.tasks do
+			Theme.label(scroll, (if t.optional then "◇ " else "○ ") .. t.label, 13)
+		end
+		for _, w in s.warnings do
+			Theme.label(scroll, "! " .. w, 12, { TextColor3 = Theme.Colors.Warm, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0) })
+		end
+	end
+	Theme.header(scroll, "Главы")
+	for _, ch in res.data.chapters do
+		Theme.label(scroll, string.format("%s — %s%s", ch.title, ch.summary, if #ch.shifts == 0 then " (в разработке)" else ""), 12, { TextColor3 = Theme.Colors.TextDim, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0) })
+	end
 end
 
-------------------------------------------------------------------------------
-local function briefing()
-	local res = call("TerminalQuery", "briefing")
-	local b = res and res.data
-	local body = open("Брифинг", 640, 460)
+-- ===== Archive =================================================================
+
+local function openArchive()
+	local body = open("Архив экспедиций", 760, 540)
+	currentScreen = "Archive"
+	local a = call("GetArchive")
+	if not a then
+		return
+	end
+	local tabs = Theme.frame(body, { Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1 })
+	Theme.list(tabs, 6, true)
+	local content = Theme.frame(body, { Position = UDim2.new(0, 0, 0, 42), Size = UDim2.new(1, 0, 1, -42), BackgroundTransparency = 1 })
+	local function show(kind: string)
+		for _, c in content:GetChildren() do
+			c:Destroy()
+		end
+		local scroll = Theme.scroll(content)
+		Theme.list(scroll, 6)
+		if kind == "docs" then
+			Theme.label(scroll, string.format("Найдено документов: %d", a.documentCount), 13, { TextColor3 = Theme.Colors.TextDim })
+			for _, d in a.documents do
+				local card = Theme.frame(scroll, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = Theme.Colors.PanelAlt })
+				Theme.corner(card, 3)
+				Theme.padding(card, 8)
+				Theme.list(card, 2)
+				Theme.label(card, (if d.found then "■ " else "□ ") .. d.kind .. " · " .. d.title, 14, { Font = Theme.FontBold, TextColor3 = if d.found then Theme.Colors.Text else Theme.Colors.TextDim })
+				Theme.label(card, d.body, 12, { Font = Theme.FontMono, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0), TextColor3 = if d.found then Theme.Colors.Text else Theme.Colors.TextDim })
+			end
+		elseif kind == "chapters" then
+			for _, ch in a.chapters do
+				Theme.label(scroll, string.format("%s %s", if ch.unlocked then "■" else "□", ch.title), 14, { Font = Theme.FontBold })
+				Theme.label(scroll, ch.summary .. (if not ch.available then "  (в разработке)" else ""), 12, { TextColor3 = Theme.Colors.TextDim, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0) })
+			end
+		elseif kind == "lore" then
+			for _, l in a.creatures do
+				Theme.label(scroll, l.title, 14, { Font = Theme.FontBold, TextColor3 = if l.unlocked then Theme.Colors.Accent else Theme.Colors.TextDim })
+				Theme.label(scroll, l.text, 12, { AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0) })
+			end
+		else
+			Theme.label(scroll, string.format("Смен: %d · успешных: %d · спасений: %d · ночей: %d", a.stats.shifts, a.stats.successes, a.stats.rescues, a.stats.nightsSurvived or 0), 13)
+			for _, h in a.history do
+				Theme.label(scroll, string.format("%s  %s  +%d", if h.success then "■" else "✕", h.missionId, h.reward), 12, { Font = Theme.FontMono, TextColor3 = Theme.Colors.TextDim })
+			end
+		end
+	end
+	for _, t in { { "ДОКУМЕНТЫ", "docs" }, { "ГЛАВЫ", "chapters" }, { "СВЕДЕНИЯ", "lore" }, { "ИСТОРИЯ", "history" } } do
+		Theme.button(tabs, t[1], function()
+			show(t[2])
+		end, { Size = UDim2.new(0, 150, 0, 30), TextSize = 13 })
+	end
+	show("docs")
+end
+
+-- ===== Registration ===========================================================
+
+local function openRegistration()
+	local body = open("Регистрация · профиль сотрудника", 560, 420)
+	currentScreen = "Registration"
+	local res = call("TerminalQuery", "registration")
+	if not res then
+		return
+	end
+	local d = res.data
 	local scroll = Theme.scroll(body)
 	Theme.list(scroll, 6)
-	if not b then
-		Theme.label(scroll, "Вы не состоите в смене. Создайте или выберите смену на доске смен, затем вернитесь к пульту брифинга.", 15, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-		return
-	end
-	Theme.label(scroll, b.title, 18, { Font = Theme.FontBold })
-	Theme.label(scroll, string.format("Тип: %s · Опасность: %s", b.kind, b.danger), 13, { TextColor3 = C.TextDim })
-	Theme.header(scroll, "Необходимые работы")
-	Theme.label(scroll, "• " .. b.mainTask, 14)
-	if b.optionalTask then
-		Theme.label(scroll, "• (дополнительно) " .. b.optionalTask, 14, { TextColor3 = C.TextDim })
-	end
-	Theme.header(scroll, "Сводка")
-	for _, l in b.briefing do
-		Theme.label(scroll, l, 14, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-	end
-	Theme.header(scroll, "Известные неисправности и предупреждения")
-	for _, l in b.warnings do
-		Theme.label(scroll, "! " .. l, 14, { TextColor3 = C.Accent, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-	end
-	Theme.header(scroll, "Доступные инструменты")
-	Theme.label(scroll, table.concat(b.tools, " · "), 13, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-	Theme.header(scroll, "Условия эвакуации")
-	Theme.label(scroll, b.evacuation .. ". Шлюз открывается после активации терминала и завершения основной задачи.", 14, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-end
-
-------------------------------------------------------------------------------
-local function archive()
-	local data = call("GetArchive")
-	local body = open("Персональный архив", 860, 540)
-	if not data then
-		return
-	end
-	local tabs = Theme.frame(body, { Size = UDim2.new(1, 0, 0, 36), BackgroundTransparency = 1 })
-	Theme.list(tabs, 6, true)
-	local content = Theme.frame(body, { Position = UDim2.new(0, 0, 0, 44), Size = UDim2.new(1, 0, 1, -44), BackgroundTransparency = 1 })
-	local function clear()
-		for _, ch in content:GetChildren() do
-			ch:Destroy()
-		end
-	end
-	local function docsTab()
-		clear()
-		local list = Theme.scroll(content, { Size = UDim2.new(0.42, -6, 1, 0) })
-		Theme.list(list, 4)
-		local reader = Theme.scroll(content, { Position = UDim2.new(0.42, 6, 0, 0), Size = UDim2.new(0.58, -6, 1, 0) })
-		Theme.list(reader, 6)
-		Theme.label(reader, "Выберите документ.", 14, { TextColor3 = C.TextDim })
-		Theme.label(list, string.format("Найдено: %d / %d", data.documentCount, #data.documents), 13, { TextColor3 = C.TextDim })
-		for _, d in data.documents do
-			Theme.button(list, (d.found and "■ " or "□ ") .. d.title .. "  <font color='#969ea6'>гл." .. d.chapter .. "</font>", function()
-				for _, ch in reader:GetChildren() do
-					if ch:IsA("GuiObject") then
-						ch:Destroy()
-					end
-				end
-				if d.found then
-					Theme.label(reader, d.title, 16, { Font = Theme.FontBold })
-					Theme.label(reader, d.kind .. " · " .. d.author, 12, { TextColor3 = C.TextDim })
-					Theme.label(reader, d.body, 14, { Font = Theme.FontMono, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-				else
-					Theme.label(reader, "Документ не найден. Ищите в секторах комплекса во время смен.", 14, { TextColor3 = C.TextDim })
-				end
-			end, { TextXAlignment = Enum.TextXAlignment.Left, Size = UDim2.new(1, 0, 0, 30), TextSize = 13, RichText = true, TextColor3 = if d.found then C.Text else C.TextDim })
-		end
-	end
-	local function chaptersTab()
-		clear()
-		local s = Theme.scroll(content)
-		Theme.list(s, 6)
-		for _, ch in data.chapters do
-			local card = Theme.frame(s, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.Panel })
-			Theme.stroke(card, if ch.unlocked then C.Accent else C.Border)
-			Theme.corner(card)
-			Theme.padding(card, 8)
-			Theme.list(card, 3)
-			Theme.label(card, ch.title, 15, { Font = Theme.FontBold, TextColor3 = if ch.unlocked then C.Text else C.TextDim })
-			Theme.label(card, ch.summary, 13, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-			Theme.label(card, if ch.unlocked then "ОТКРЫТА" elseif not ch.available then "В РАЗРАБОТКЕ" else string.format("Требуется документов: %d%s", ch.requires.documents, if ch.requires.chapter then " и завершение главы " .. ch.requires.chapter else ""), 12, { TextColor3 = if ch.unlocked then C.Good else C.TextDim })
-		end
-	end
-	local function creaturesTab()
-		clear()
-		local s = Theme.scroll(content)
-		Theme.list(s, 6)
-		for _, k in data.creatures do
-			Theme.label(s, k.title, 15, { Font = Theme.FontBold, TextColor3 = if k.unlocked then C.Text else C.TextDim })
-			Theme.label(s, k.text, 13, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-		end
-	end
-	local function historyTab()
-		clear()
-		local s = Theme.scroll(content)
-		Theme.list(s, 4)
-		Theme.label(s, string.format("Смен: %d · Успешных: %d · Документов: %d", data.stats.shifts, data.stats.successes, data.stats.documentsFound), 13, { TextColor3 = C.TextDim })
-		if #data.history == 0 then
-			Theme.label(s, "История смен пуста.", 14, { TextColor3 = C.TextDim })
-		end
-		for _, h in data.history do
-			Theme.label(s, string.format("%s  %s  +%d  seed %d  %s", if h.success then "■" else "✕", h.title, h.reward, h.seed, os.date("%d.%m %H:%M", h.time)), 13, { TextColor3 = if h.success then C.Good else C.Danger })
-		end
-	end
-	for _, t in { { "ДОКУМЕНТЫ", docsTab }, { "ГЛАВЫ", chaptersTab }, { "СУЩЕСТВА", creaturesTab }, { "ИСТОРИЯ", historyTab } } do
-		Theme.button(tabs, t[1], t[2], { Size = UDim2.new(0, 150, 0, 32), TextSize = 13 })
-	end
-	docsTab()
-end
-
-------------------------------------------------------------------------------
-local function registration()
-	local res = call("TerminalQuery", "registration")
-	local d = res and res.data
-	local body = open("Регистрация персонала", 560, 460)
-	local s = Theme.scroll(body)
-	Theme.list(s, 6)
-	if not d then
-		return
-	end
-	Theme.label(s, d.name, 20, { Font = Theme.FontBold })
-	Theme.label(s, string.format("Уровень допуска: <b>%s</b> · Кредиты: <b>%d</b> · Документов: <b>%d</b>", d.accessLevel, d.currency, d.documents), 14)
-	Theme.label(s, "Инструмент: " .. d.selectedTool, 13, { TextColor3 = C.TextDim })
+	Theme.label(scroll, d.name, 18, { Font = Theme.FontBold })
 	if d.transient then
-		Theme.label(s, "! Хранилище данных недоступно: прогресс этой сессии не будет сохранён.", 12, { TextColor3 = C.Danger })
+		Theme.label(scroll, "Хранилище данных недоступно: прогресс этой сессии не сохранится.", 12, { TextColor3 = Theme.Colors.Danger, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0) })
 	end
-	Theme.header(s, "Сюжетные главы")
-	for _, ch in d.chapters do
-		Theme.label(s, string.format("%s %s%s", if ch.unlocked then "■" else "□", ch.title, if not ch.available then " (в разработке)" else ""), 14, { TextColor3 = if ch.unlocked then C.Text else C.TextDim })
+	Theme.label(scroll, string.format("Валюта: %d · Документов: %d · Инструмент: %s", d.currency, d.documents, d.selectedToolName), 13)
+	Theme.label(scroll, string.format("Смен: %d · Успешных: %d · Спасений: %d · Ночей пережито: %d", d.stats.shifts, d.stats.successes, d.stats.rescues, d.stats.nightsSurvived or 0), 13)
+	Theme.header(scroll, "Открытые главы")
+	for idx in d.chapters do
+		Theme.label(scroll, "Глава " .. tostring(idx), 13)
 	end
-	Theme.header(s, "Следующая смена")
-	if d.nextShift then
-		Theme.label(s, d.nextShift.title .. " — " .. d.nextShift.mainTask, 14, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-	end
-	Theme.header(s, "История смен")
-	if #d.history == 0 then
-		Theme.label(s, "Смен ещё не было.", 13, { TextColor3 = C.TextDim })
-	end
+	Theme.header(scroll, "Последние смены")
 	for _, h in d.history do
-		Theme.label(s, string.format("%s %s  +%d", if h.success then "■" else "✕", h.title, h.reward), 13, { TextColor3 = if h.success then C.Good else C.Danger })
+		Theme.label(scroll, string.format("%s  %s  +%d", if h.success then "■" else "✕", h.missionId, h.reward), 12, { Font = Theme.FontMono, TextColor3 = Theme.Colors.TextDim })
 	end
-	Theme.header(s, "Статистика")
-	Theme.label(s, string.format("Смен: %d · Успешных: %d · Спасений: %d", d.stats.shifts, d.stats.successes, d.stats.rescues), 13)
 end
 
 function LobbyUIController.init()
 	InteractionController.OpenUI:Connect(function(ui, prompt)
-		if ui == "ShiftBoard" then
-			shiftBoard()
+		if ui == "RoomBoard" then
+			openBoard()
 		elseif ui == "Equipment" then
-			equipment(prompt)
+			openEquipment(prompt)
 		elseif ui == "Briefing" then
-			briefing()
+			openBriefing()
 		elseif ui == "Archive" then
-			archive()
+			openArchive()
 		elseif ui == "Registration" then
-			registration()
+			openRegistration()
 		end
 	end)
-	Net.event("ShiftListUpdated").OnClientEvent:Connect(function(list)
-		shiftList = list
-		if boardRefresh then
-			boardRefresh()
+	Net.event("RoomListUpdated").OnClientEvent:Connect(function(payload)
+		roomsCache = payload
+		if currentScreen == "RoomBoard" and gui then
+			local body = gui:FindFirstChild("Body", true)
+			if body then
+				renderBoard(body)
+			end
 		end
 	end)
-	Net.event("RoundState").OnClientEvent:Connect(function(st)
-		if st.phase and st.phase ~= "Idle" then
-			LobbyUIController.close()
+	Net.event("RoundState").OnClientEvent:Connect(function(state)
+		if state.phase ~= "Idle" then
+			close()
 		end
 	end)
-	local _ = GameConfig
 end
 
 return LobbyUIController

@@ -16,7 +16,7 @@ local CreatureService = require(script.Parent.CreatureService)
 
 local R = GameConfig.Rescue
 
-type Downed = { since: number, deadline: number, prompt: ProximityPrompt?, selfRescueAt: number?, holdBegan: { [Player]: number } }
+type Downed = { since: number, deadline: number, prompt: ProximityPrompt?, selfRescueAt: number?, holdBegan: { [Player]: number }, reason: string }
 
 local RescueService = {}
 RescueService.PlayerDowned = Signal.new() :: Signal.Signal<Player>
@@ -43,7 +43,8 @@ local function flags(player: Player)
 	local d = downed[player]
 	Net.event("PlayerFlags"):FireClient(player, {
 		downed = d ~= nil,
-		downedUntil = if d then d.deadline else nil,
+		downedSeconds = if d then math.max(0, d.deadline - os.clock()) else nil,
+		downedReason = if d then d.reason else nil,
 		selfRescueCharges = selfCharges[player] or 0,
 		eliminated = eliminated[player] == true,
 		selfRescuing = d ~= nil and d.selfRescueAt ~= nil,
@@ -121,7 +122,7 @@ local function revive(player: Player, by: Player?)
 	RescueService.PlayerRevived:Fire(player, by)
 end
 
-function RescueService.Down(player: Player)
+function RescueService.Down(player: Player, reason: string?)
 	if downed[player] or eliminated[player] or not inShift(player) then
 		return
 	end
@@ -136,7 +137,7 @@ function RescueService.Down(player: Player)
 	hum.JumpPower = 0
 	char:SetAttribute("Downed", true)
 	local now = os.clock()
-	local d: Downed = { since = now, deadline = now + R.DownedSeconds, prompt = nil, selfRescueAt = nil, holdBegan = {} }
+	local d: Downed = { since = now, deadline = now + R.DownedSeconds, prompt = nil, selfRescueAt = nil, holdBegan = {}, reason = reason or "creature" }
 	downed[player] = d
 	local s = Builder.sound(hrp, Sounds.Downed, "DownedSfx")
 	s:Play()
@@ -175,8 +176,17 @@ function RescueService.Down(player: Player)
 	end)
 	flags(player)
 	Net.event("DownedState"):FireAllClients({ player = player, downed = true })
-	Net.event("Notification"):FireClient(player, { title = "Вы выведены из строя", text = string.format("Дождитесь помощи (%d с) или используйте инъекцию.", R.DownedSeconds), kind = "danger" })
+	Net.event("Notification"):FireClient(player, { title = if reason == "cold" then "Вы теряете сознание от холода" else "Вы выведены из строя", text = string.format("Дождитесь помощи (%d с). Товарищ с аптечкой поднимет быстрее.", R.DownedSeconds), kind = "danger" })
 	RescueService.PlayerDowned:Fire(player)
+end
+
+function RescueService.GrantSelfCharge(player: Player)
+	selfCharges[player] = (selfCharges[player] or 0) + 1
+	flags(player)
+end
+
+function RescueService.Revive(player: Player, by: Player?)
+	revive(player, by)
 end
 
 function RescueService.ApplyHit(player: Player, damage: number)
@@ -216,13 +226,7 @@ function RescueService.BeginShift(players: { Player })
 	table.clear(eliminated)
 	table.clear(selfCharges)
 	for _, p in players do
-		local charges = R.SelfRescueCharges
-		local id = toolOf(p)
-		local def = id and Tools.Defs[id]
-		if def and (def.capabilities.extra_stim or 0) > 0 then
-			charges += 1
-		end
-		selfCharges[p] = charges
+		selfCharges[p] = 0
 		flags(p)
 	end
 end
@@ -257,6 +261,17 @@ function RescueService.Init()
 	end)
 	CreatureService.SetTargetFilter(function(p)
 		return RescueService.IsActive(p)
+	end)
+	-- Cold collapse: downed with a "cold" reason; warmth (medkit / heater) restores.
+	local TemperatureService = require(script.Parent.TemperatureService)
+	TemperatureService.Collapsed:Connect(function(player)
+		RescueService.Down(player, "cold")
+	end)
+	TemperatureService.StageChanged:Connect(function(player, stage)
+		local d = downed[player]
+		if d and d.reason == "cold" and stage < 3 then
+			revive(player, nil)
+		end
 	end)
 	Net.func("RescueAction").OnServerInvoke = function(player, action)
 		if not limiter:allow(player) then

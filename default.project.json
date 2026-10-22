@@ -1,5 +1,5 @@
 {
-  "name": "NightShiftBlacksite",
+  "name": "Vostok9",
   "globIgnorePaths": [
     "**/*.spec.luau"
   ],
@@ -13,7 +13,7 @@
     },
     "ServerScriptService": {
       "$className": "ServerScriptService",
-      "NightShift": {
+      "Vostok9": {
         "$path": "src/server"
       }
     },
@@ -22,13 +22,14 @@
       "$properties": {
         "CameraMode": "LockFirstPerson",
         "EnableMouseLockOption": false,
-        "CharacterWalkSpeed": 12,
+        "CharacterWalkSpeed": 11,
         "CharacterJumpPower": 0,
-        "AutoJumpEnabled": false
+        "AutoJumpEnabled": false,
+        "LoadCharacterAppearance": true
       },
       "StarterPlayerScripts": {
         "$className": "StarterPlayerScripts",
-        "NightShiftClient": {
+        "Vostok9Client": {
           "$path": "src/client"
         }
       }
@@ -36,49 +37,57 @@
     "Lighting": {
       "$className": "Lighting",
       "$properties": {
-        "Ambient": [
-          0.05,
-          0.06,
-          0.08
-        ],
-        "OutdoorAmbient": [
-          0.03,
-          0.03,
-          0.04
-        ],
-        "Brightness": 0.6,
-        "ClockTime": 0,
+        "Ambient": [0.07, 0.08, 0.11],
+        "OutdoorAmbient": [0.09, 0.11, 0.16],
+        "Brightness": 0.35,
+        "ClockTime": 0.5,
+        "GeographicLatitude": -78,
         "GlobalShadows": true,
-        "EnvironmentDiffuseScale": 0.2,
-        "EnvironmentSpecularScale": 0.4,
-        "ExposureCompensation": -0.15,
-        "FogColor": [
-          0.02,
-          0.02,
-          0.03
-        ],
-        "FogStart": 60,
-        "FogEnd": 320,
+        "EnvironmentDiffuseScale": 0.25,
+        "EnvironmentSpecularScale": 0.45,
+        "ExposureCompensation": -0.2,
+        "FogColor": [0.36, 0.42, 0.5],
+        "FogStart": 40,
+        "FogEnd": 180,
+        "ShadowSoftness": 0.35,
         "Technology": "ShadowMap"
+      },
+      "Atmosphere": {
+        "$className": "Atmosphere",
+        "$properties": {
+          "Density": 0.42,
+          "Offset": 0.1,
+          "Color": [0.58, 0.64, 0.72],
+          "Decay": [0.3, 0.34, 0.42],
+          "Glare": 0.15,
+          "Haze": 2.2
+        }
       },
       "ColorGrade": {
         "$className": "ColorCorrectionEffect",
         "$properties": {
-          "Saturation": -0.18,
-          "Contrast": 0.12,
-          "TintColor": [
-            0.9,
-            0.94,
-            1.0
-          ]
+          "Saturation": -0.22,
+          "Contrast": 0.1,
+          "Brightness": -0.02,
+          "TintColor": [0.86, 0.92, 1.0]
         }
       },
       "Bloom": {
         "$className": "BloomEffect",
         "$properties": {
-          "Intensity": 0.25,
-          "Size": 24,
-          "Threshold": 1.6
+          "Intensity": 0.3,
+          "Size": 28,
+          "Threshold": 1.5
+        }
+      },
+      "Grain": {
+        "$className": "DepthOfFieldEffect",
+        "$properties": {
+          "Enabled": false,
+          "FarIntensity": 0.08,
+          "FocusDistance": 20,
+          "InFocusRadius": 30,
+          "NearIntensity": 0
         }
       }
     },
@@ -86,13 +95,15 @@
       "$className": "SoundService",
       "$properties": {
         "RespectFilteringEnabled": true,
-        "AmbientReverb": "Hangar"
+        "AmbientReverb": "NoReverb",
+        "DistanceFactor": 3.33
       }
     },
     "Workspace": {
       "$className": "Workspace",
       "$properties": {
-        "StreamingEnabled": false
+        "StreamingEnabled": false,
+        "Gravity": 196.2
       }
     }
   }

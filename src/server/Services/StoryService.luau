@@ -1,154 +1,123 @@
 --!nonstrict
--- Story documents: placement inside the complex, server-validated pickup,
--- personal archive queries and chapter progression.
+-- Documents in the world and the player's archive. Per-shift secrets (the
+-- warehouse code, the dispatcher frequency) are substituted into document
+-- bodies at placement so the paper trail is the real source of truth.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Documents = require(ReplicatedStorage.Shared.Config.Documents)
-local Missions = require(ReplicatedStorage.Shared.Config.Missions)
-local Sounds = require(ReplicatedStorage.Shared.Config.SoundLibrary)
+local Chapters = require(ReplicatedStorage.Shared.Config.Chapters)
 local Builder = require(ReplicatedStorage.Shared.Utilities.Builder)
-local SeededRandom = require(ReplicatedStorage.Shared.Utilities.SeededRandom)
+local Props = require(ReplicatedStorage.Shared.Utilities.Props)
+local Signal = require(ReplicatedStorage.Shared.Utilities.Signal)
 local Net = require(ReplicatedStorage.Shared.Utilities.Net)
 local RateLimiter = require(ReplicatedStorage.Shared.Utilities.RateLimiter)
-local Props = require(script.Parent.Parent.MapModules.Props)
 local PlayerDataService = require(script.Parent.PlayerDataService)
-local FacilityService = require(script.Parent.FacilityService)
 
 local StoryService = {}
+StoryService.DocumentRead = Signal.new() :: Signal.Signal<Player, string>
 
-local placed: { [string]: BasePart } = {}
-local foundThisShift: { [Player]: { string } } = {}
-local limiter = RateLimiter.new(5, 1)
-
--- Creature knowledge entries unlock as the archive grows; no positions, only lore.
-local CreatureKnowledge = {
-	{ docs = 1, title = "Смотритель — запись 1", text = "Высокий силуэт в повреждённом защитном снаряжении. Медленно обходит сервисные коридоры. Реагирует на звук." },
-	{ docs = 3, title = "Смотритель — запись 2", text = "Замечает свет фонаря на большом расстоянии. Теряет цель, если её не видно несколько секунд, и проверяет последнее известное место." },
-	{ docs = 5, title = "Смотритель — запись 3", text = "Не ломает двери. Ждёт, пока их откроют. Связан с линией питания 4 и изоляционным сектором." },
+local placed: { [string]: { part: BasePart, body: string } } = {}
+local foundThisShift: { [Player]: { [string]: boolean } } = {}
+local limiter = RateLimiter.new(6, 2)
+local folder: Folder? = nil
+local deps = {
+	inShift = function(_: Player)
+		return false
+	end,
 }
 
-function StoryService.PlaceDocuments(map: FacilityService.MapHandle, mission: Missions.MissionDef, seed: number)
-	table.clear(placed)
-	table.clear(foundThisShift)
-	local rng = SeededRandom.new(seed + 404)
-	local folder = Builder.folder(map.root, "Documents")
-	local spots = rng:shuffle(map.documentSpots)
-	local used: { [number]: boolean } = {}
-	for _, docId in mission.documents do
+function StoryService.Configure(api)
+	for k, v in api do
+		deps[k] = v
+	end
+end
+
+local function bodyFor(def: Documents.DocumentDef, secrets: { [string]: string }): string
+	if def.secret and secrets[def.secret] then
+		return string.format(def.body, secrets[def.secret])
+	end
+	return def.body
+end
+
+function StoryService.PlaceDocuments(map, shiftDef, secrets: { [string]: string })
+	StoryService.ClearShift()
+	folder = Builder.folder(map.root, "Documents")
+	for _, docId in shiftDef.documents do
 		local def = Documents.Defs[docId]
-		if not def then
+		local cf = def and map.documentSpots[def.spot]
+		if not def or not cf then
 			continue
 		end
-		-- Prefer a spot in the document's home sector, else anywhere free.
-		local chosen: number? = nil
-		for i, spot in spots do
-			if not used[i] and spot.sector == def.sector then
-				chosen = i
-				break
-			end
-		end
-		if not chosen then
-			for i in spots do
-				if not used[i] then
-					chosen = i
-					break
-				end
-			end
-		end
-		if not chosen then
-			break
-		end
-		used[chosen] = true
-		local spot = spots[chosen]
-		local paper = Props.documentPickup(folder, spot.cframe * CFrame.new(0, -0.95, 0) * CFrame.Angles(0, rng:nextNumber(-0.4, 0.4), 0), docId, def.title)
-		local prompt = Builder.prompt(paper, "Прочитать", def.title, 0.5, Enum.KeyCode.E, 7)
+		local part = Props.documentPickup(folder, cf, docId, def.title, def.kind)
+		local body = bodyFor(def, secrets)
+		placed[docId] = { part = part, body = body }
+		local prompt = Builder.prompt(part, "Прочитать", def.kind, 0.4, Enum.KeyCode.E, 7)
 		prompt:SetAttribute("UI", "Document")
 		prompt:SetAttribute("DocumentId", docId)
 		prompt.Triggered:Connect(function(player)
 			StoryService.Read(player, docId)
 		end)
-		placed[docId] = paper
 	end
 end
 
 function StoryService.Read(player: Player, docId: string): boolean
-	if not limiter:allow(player) then
-		return false
-	end
-	local paper = placed[docId]
+	local entry = placed[docId]
 	local def = Documents.Defs[docId]
-	if not paper or not def or not paper.Parent then
+	if not entry or not def or not deps.inShift(player) then
 		return false
 	end
-	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if not hrp or (hrp.Position - paper.Position).Magnitude > 12 then
+	if not limiter:allow(player) or not Net.near(player, entry.part.CFrame.Position, 12) then
 		return false
 	end
-	local isNew = PlayerDataService.AddDocument(player, docId)
+	foundThisShift[player] = foundThisShift[player] or {}
+	local isNew = not foundThisShift[player][docId]
+	foundThisShift[player][docId] = true
+	local profileNew = PlayerDataService.AddDocument(player, docId)
+	Net.event("DocumentFound"):FireClient(player, { id = docId, title = def.title, author = def.author, kind = def.kind, body = entry.body, isNew = profileNew })
 	if isNew then
-		foundThisShift[player] = foundThisShift[player] or {}
-		table.insert(foundThisShift[player], docId)
-		local s = Builder.sound(paper, Sounds.UIConfirm, "Found")
-		s:Play()
-		task.delay(2, function()
-			s:Destroy()
-		end)
+		StoryService.DocumentRead:Fire(player, docId)
 	end
-	Net.event("DocumentFound"):FireClient(player, { id = docId, title = def.title, author = def.author, kind = def.kind, body = def.body, isNew = isNew })
 	return true
 end
 
 function StoryService.FoundThisShift(player: Player): number
-	local list = foundThisShift[player]
-	return if list then #list else 0
+	local n = 0
+	for _ in foundThisShift[player] or {} do
+		n += 1
+	end
+	return n
 end
 
 function StoryService.ClearShift()
+	if folder then
+		folder:Destroy()
+		folder = nil
+	end
 	table.clear(placed)
 	table.clear(foundThisShift)
 end
 
 function StoryService.Archive(player: Player)
-	local profile = PlayerDataService.Get(player)
-	if not profile then
+	local p = PlayerDataService.Get(player)
+	if not p then
 		return nil
 	end
 	local docs = {}
 	for _, id in Documents.Order do
 		local def = Documents.Defs[id]
-		local found = profile.documents[id] == true
-		table.insert(docs, {
-			id = id,
-			kind = def.kind,
-			title = if found then def.title else "[НЕ НАЙДЕНО]",
-			author = if found then def.author else "",
-			body = if found then def.body else "",
-			chapter = def.chapter,
-			found = found,
-		})
+		local found = p.documents[id] == true
+		table.insert(docs, { id = id, title = if found then def.title else "???", kind = def.kind, author = if found then def.author else "—", chapter = def.chapter, found = found, body = if found then (if def.secret then string.format(def.body, "****") else def.body) else "Документ ещё не найден." })
 	end
-	local count = PlayerDataService.CountDocuments(profile)
+	local count = PlayerDataService.CountDocuments(p)
 	local chapters = {}
-	for _, ch in Missions.Chapters do
-		table.insert(chapters, {
-			index = ch.index,
-			title = ch.title,
-			summary = ch.summary,
-			unlocked = profile.chaptersUnlocked[ch.index] == true,
-			requires = ch.unlockRequires,
-			available = #ch.missions > 0,
-		})
+	for _, ch in Chapters.List do
+		table.insert(chapters, { index = ch.index, title = ch.title, summary = ch.summary, unlocked = p.chaptersUnlocked[ch.index] == true, available = #ch.shifts > 0, requires = ch.unlockRequires })
 	end
-	local creatures = {}
-	for _, k in CreatureKnowledge do
-		table.insert(creatures, { title = k.title, text = if count >= k.docs then k.text else "[Требуется документов: " .. k.docs .. "]", unlocked = count >= k.docs })
+	local lore = {}
+	for _, l in Documents.Lore do
+		table.insert(lore, { title = l.title, text = if count >= l.threshold then l.text else string.format("Откроется после %d документов.", l.threshold), unlocked = count >= l.threshold })
 	end
-	local history = {}
-	for _, h in profile.shiftHistory do
-		local m = Missions.Defs[h.missionId]
-		table.insert(history, { title = if m then m.title else h.missionId, success = h.success, reward = h.reward, time = h.time, seed = h.seed })
-	end
-	return { documents = docs, chapters = chapters, creatures = creatures, history = history, documentCount = count, stats = profile.stats }
+	return { documentCount = count, documents = docs, chapters = chapters, creatures = lore, stats = p.stats, history = p.shiftHistory }
 end
 
 function StoryService.Init()
@@ -159,10 +128,10 @@ function StoryService.Init()
 		return StoryService.Archive(player)
 	end
 	Net.func("ReadDocument").OnServerInvoke = function(player, docId)
-		if not Net.isString(docId, 64) then
-			return Net.fail("bad id")
+		if not limiter:allow(player) or not Net.isString(docId, 48) then
+			return Net.fail("bad args")
 		end
-		return if StoryService.Read(player, docId) then Net.ok() else Net.fail("too far")
+		return if StoryService.Read(player, docId) then Net.ok() else Net.fail("Документ недоступен")
 	end
 end
 

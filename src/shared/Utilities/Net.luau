@@ -8,41 +8,46 @@ local Net = {}
 
 Net.Events = {
 	-- server -> client
-	"ShiftListUpdated", "ProfileUpdated", "RoundState", "TaskUpdated", "Notification",
+	"RoomListUpdated", "ProfileUpdated", "RoundState", "TaskUpdated", "Notification",
 	"Results", "Briefing", "SignalBroadcast", "DownedState", "SpectateTarget", "DebugLayout",
-	"CreatureState", "FacilityState", "DocumentFound", "PlayerFlags",
+	"CreatureState", "PowerState", "WeatherState", "ClockState", "PlayerFlags", "DocumentFound",
+	"Subtitle", "Cinematic", "RadioState", "InventoryUpdated", "HeadcountResult", "ScannerEvent",
+	"Hallucination", "GeneratorState", "StoryEvent",
 	-- client -> server
-	"SignalSend", "FlashlightState", "MovementState", "ClientReady",
+	"SignalSend", "FlashlightState", "ClientReady", "CinematicDone",
 }
 
 Net.Functions = {
-	"ShiftCreate", "ShiftJoin", "ShiftLeave", "ShiftReady", "ShiftStart", "ShiftList",
-	"SelectTool", "GetProfile", "GetArchive", "SaveSettings",
-	"TaskInteract", "RescueAction", "ReturnToLobby", "ReadDocument", "TerminalQuery",
+	"RoomCreate", "RoomJoin", "RoomLeave", "RoomReady", "RoomStart", "RoomList",
+	"SelectTool", "GetProfile", "GetArchive", "SaveSettings", "TerminalQuery",
+	"RescueAction", "ReturnToLobby", "ReadDocument", "IntroChoice",
+	"RadioTune", "RadioSend", "RadioQuery", "KeypadSubmit", "InventoryUse",
+	"BreakerToggle", "BreakerReset", "Headcount", "GeneratorAction",
 }
 
 local folder: Folder? = nil
 
 local function getFolder(): Folder
 	if folder then
-		return folder
+		return folder :: Folder
 	end
 	if RunService:IsServer() then
 		local f = ReplicatedStorage:FindFirstChild("Remotes") :: Folder?
 		if not f then
-			f = Instance.new("Folder")
-			f.Name = "Remotes"
+			local nf = Instance.new("Folder")
+			nf.Name = "Remotes"
 			for _, name in Net.Events do
 				local e = Instance.new("RemoteEvent")
 				e.Name = name
-				e.Parent = f
+				e.Parent = nf
 			end
 			for _, name in Net.Functions do
 				local e = Instance.new("RemoteFunction")
 				e.Name = name
-				e.Parent = f
+				e.Parent = nf
 			end
-			f.Parent = ReplicatedStorage
+			nf.Parent = ReplicatedStorage
+			f = nf
 		end
 		folder = f
 	else
@@ -106,6 +111,17 @@ end
 
 function Net.fail(reason: string): { ok: boolean, reason: string }
 	return { ok = false, reason = reason }
+end
+
+-- Distance guard shared by interaction handlers: the player's root must be
+-- within `maxDist` studs of `position`.
+function Net.near(player: Player, position: Vector3, maxDist: number): boolean
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp or not hrp:IsA("BasePart") then
+		return false
+	end
+	return (hrp.Position - position).Magnitude <= maxDist
 end
 
 return Net

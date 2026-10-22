@@ -15,6 +15,11 @@ SettingsStore.Current = {
 	cameraShake = 0.6,
 	subtitles = true,
 	effectsQuality = 2,
+	dialogueVolume = 1,
+	particles = 2,
+	frost = true,
+	postFx = 1,
+	breath = true,
 }
 
 local saveThread: thread? = nil

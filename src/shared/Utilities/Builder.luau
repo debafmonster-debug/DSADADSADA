@@ -43,6 +43,34 @@ Builder.Palette = {
 	LightEmergency = Color3.fromRGB(255, 60, 40),
 	LightLab = Color3.fromRGB(190, 255, 230),
 	ScreenBlue = Color3.fromRGB(70, 150, 220),
+	-- «Восток-9» palette: faded orange hulls, cold snow, graphite metal,
+	-- dirty-white interiors, old green equipment, three light temperatures.
+	StationOrange = Color3.fromRGB(196, 104, 42),
+	StationOrangeDark = Color3.fromRGB(142, 76, 34),
+	StationOrangeFaded = Color3.fromRGB(176, 112, 70),
+	RoofGrey = Color3.fromRGB(96, 100, 104),
+	Snow = Color3.fromRGB(214, 222, 232),
+	SnowShadow = Color3.fromRGB(168, 182, 200),
+	Ice = Color3.fromRGB(190, 214, 230),
+	Graphite = Color3.fromRGB(58, 60, 64),
+	GraphiteLight = Color3.fromRGB(92, 96, 102),
+	DirtyWhite = Color3.fromRGB(196, 192, 180),
+	DirtyWhiteDark = Color3.fromRGB(166, 160, 148),
+	OldGreen = Color3.fromRGB(96, 118, 96),
+	OldGreenDark = Color3.fromRGB(66, 84, 68),
+	Wood = Color3.fromRGB(120, 92, 62),
+	WoodDark = Color3.fromRGB(84, 62, 42),
+	Fabric = Color3.fromRGB(88, 96, 104),
+	FabricWarm = Color3.fromRGB(128, 96, 72),
+	Blanket = Color3.fromRGB(96, 108, 92),
+	Paper = Color3.fromRGB(214, 206, 180),
+	Mug = Color3.fromRGB(210, 214, 220),
+	Bakelite = Color3.fromRGB(42, 38, 36),
+	LightFluor = Color3.fromRGB(222, 236, 244),
+	LightWarmOld = Color3.fromRGB(255, 196, 120),
+	LightEmergencyWarm = Color3.fromRGB(255, 150, 60),
+	LightFlood = Color3.fromRGB(230, 240, 255),
+	EyeGlow = Color3.fromRGB(150, 220, 255),
 }
 
 function Builder.part(o: PartOpts): Part
@@ -506,6 +534,218 @@ function Builder.invisible(parent: Instance, name: string, cframe: CFrame, size:
 	p.CanQuery = false
 	p.CanTouch = false
 	p.Parent = parent
+	return p
+end
+
+-- ===== Station-specific fixtures =====================================
+
+-- Marks a light-emitting part so PowerGridService can drive it. Lamps carry
+-- their circuit, nominal color/brightness and an optional stagger index so
+-- a dying circuit goes dark fixture by fixture instead of all at once.
+function Builder.registerLamp(lamp: BasePart, circuit: string, color: Color3, brightness: number)
+	lamp:SetAttribute("Lamp", true)
+	lamp:SetAttribute("Circuit", circuit)
+	lamp:SetAttribute("LampColor", color)
+	lamp:SetAttribute("LampBrightness", brightness)
+	lamp:SetAttribute("LampMaterial", lamp.Material.Name)
+end
+
+-- Fluorescent tube fixture (old station lighting). Housing + tube + light.
+function Builder.fluorLamp(parent: Instance, cframe: CFrame, length: number, circuit: string, color: Color3?, brightness: number?, shadows: boolean?): Part
+	local c = color or Builder.Palette.LightFluor
+	local b = brightness or 1.1
+	local housing = Builder.part({
+		name = "FluorHousing",
+		size = Vector3.new(length + 0.6, 0.35, 1.2),
+		cframe = cframe * CFrame.new(0, 0.2, 0),
+		material = Enum.Material.Metal,
+		color = Builder.Palette.DirtyWhiteDark,
+		parent = parent,
+		canCollide = false,
+	})
+	local tube = Builder.part({
+		name = "Lamp",
+		size = Vector3.new(length, 0.22, 0.4),
+		cframe = cframe,
+		shape = Enum.PartType.Cylinder,
+		material = Enum.Material.Neon,
+		color = c,
+		parent = housing,
+		canCollide = false,
+		castShadow = false,
+	})
+	local light = Builder.pointLight(tube, c, 18 + length, b, shadows)
+	light.Name = "Light"
+	Builder.registerLamp(tube, circuit, c, b)
+	return tube
+end
+
+-- Bare bulb in a wire cage (utility rooms, bunker, shed).
+function Builder.cageLamp(parent: Instance, cframe: CFrame, circuit: string, color: Color3?, brightness: number?, range: number?): Part
+	local c = color or Builder.Palette.LightWarmOld
+	local b = brightness or 0.9
+	local base = Builder.part({
+		name = "CageBase",
+		size = Vector3.new(0.8, 0.3, 0.8),
+		cframe = cframe * CFrame.new(0, 0.3, 0),
+		material = Enum.Material.Metal,
+		color = Builder.Palette.Graphite,
+		parent = parent,
+		canCollide = false,
+	})
+	local bulb = Builder.part({
+		name = "Lamp",
+		size = Vector3.new(0.5, 0.6, 0.5),
+		cframe = cframe,
+		shape = Enum.PartType.Ball,
+		material = Enum.Material.Neon,
+		color = c,
+		parent = base,
+		canCollide = false,
+		castShadow = false,
+	})
+	for i = 0, 3 do
+		Builder.part({
+			name = "CageWire",
+			size = Vector3.new(0.06, 0.9, 0.06),
+			cframe = cframe * CFrame.Angles(0, i * math.pi / 2, 0) * CFrame.new(0.32, -0.05, 0),
+			material = Enum.Material.Metal,
+			color = Builder.Palette.Graphite,
+			parent = base,
+			canCollide = false,
+			castShadow = false,
+		})
+	end
+	local light = Builder.pointLight(bulb, c, range or 16, b, false)
+	light.Name = "Light"
+	Builder.registerLamp(bulb, circuit, c, b)
+	return bulb
+end
+
+-- Emergency lamp tied to a circuit: lit only when that circuit is DOWN.
+function Builder.emergencyLampFor(parent: Instance, cframe: CFrame, circuit: string): Part
+	local lamp = Builder.emergencyLamp(parent, cframe)
+	lamp:SetAttribute("Circuit", circuit)
+	lamp.Color = Builder.Palette.LightEmergency
+	return lamp
+end
+
+-- Outdoor floodlight on a pole aimed at a point.
+function Builder.floodlight(parent: Instance, position: Vector3, height: number, aimAt: Vector3, circuit: string): Part
+	local m = Builder.model(parent, "Floodlight")
+	Builder.part({ name = "Pole", size = Vector3.new(0.9, height, 0.9), cframe = CFrame.new(position + Vector3.new(0, height / 2, 0)), material = Enum.Material.Metal, color = Builder.Palette.Graphite, parent = m })
+	Builder.part({ name = "Base", size = Vector3.new(2.4, 1, 2.4), cframe = CFrame.new(position + Vector3.new(0, 0.5, 0)), material = Enum.Material.Concrete, color = Builder.Palette.ConcreteDark, parent = m })
+	local headPos = position + Vector3.new(0, height, 0)
+	local cf = CFrame.lookAt(headPos, aimAt)
+	Builder.part({ name = "Head", size = Vector3.new(2.2, 1.4, 1.2), cframe = cf, material = Enum.Material.Metal, color = Builder.Palette.GraphiteLight, parent = m, canCollide = false })
+	local lens = Builder.part({ name = "Lamp", size = Vector3.new(1.8, 1.0, 0.2), cframe = cf * CFrame.new(0, 0, -0.6), material = Enum.Material.Neon, color = Builder.Palette.LightFlood, parent = m, canCollide = false, castShadow = false })
+	local spot = Instance.new("SpotLight")
+	spot.Name = "Light"
+	spot.Angle = 95
+	spot.Range = 60
+	spot.Brightness = 2.2
+	spot.Color = Builder.Palette.LightFlood
+	spot.Face = Enum.NormalId.Front
+	spot.Shadows = true
+	spot.Parent = lens
+	Builder.registerLamp(lens, circuit, Builder.Palette.LightFlood, 2.2)
+	return lens
+end
+
+-- Window: frame + tinted glass + a frost layer the client fades with weather.
+function Builder.window(parent: Instance, cframe: CFrame, w: number, h: number, frameColor: Color3?): Part
+	local m = Builder.model(parent, "Window")
+	local fc = frameColor or Builder.Palette.Graphite
+	local t = 0.25
+	Builder.part({ name = "FrameTop", size = Vector3.new(w + 0.5, t, 0.6), cframe = cframe * CFrame.new(0, h / 2 + t / 2, 0), material = Enum.Material.Metal, color = fc, parent = m })
+	Builder.part({ name = "FrameBottom", size = Vector3.new(w + 0.5, t, 0.6), cframe = cframe * CFrame.new(0, -h / 2 - t / 2, 0), material = Enum.Material.Metal, color = fc, parent = m })
+	Builder.part({ name = "FrameL", size = Vector3.new(t, h, 0.6), cframe = cframe * CFrame.new(-w / 2 - t / 2, 0, 0), material = Enum.Material.Metal, color = fc, parent = m })
+	Builder.part({ name = "FrameR", size = Vector3.new(t, h, 0.6), cframe = cframe * CFrame.new(w / 2 + t / 2, 0, 0), material = Enum.Material.Metal, color = fc, parent = m })
+	local glass = Builder.part({ name = "Glass", size = Vector3.new(w, h, 0.12), cframe = cframe, material = Enum.Material.Glass, color = Builder.Palette.GlassTint, parent = m, transparency = 0.45, reflectance = 0.08, castShadow = false })
+	glass.CanCollide = true
+	local frost = Builder.part({ name = "Frost", size = Vector3.new(w, h, 0.06), cframe = cframe * CFrame.new(0, 0, 0.12), material = Enum.Material.Ice, color = Builder.Palette.Ice, parent = m, transparency = 0.82, canCollide = false, castShadow = false })
+	frost:SetAttribute("Frost", true)
+	return glass
+end
+
+-- Hinged door. The leaf rotates around `Hinge` (left edge). Prompt lives on
+-- the leaf; FacilityService animates and validates it. `heavy` makes an
+-- airlock-style insulated door with a wheel handle and slower swing.
+export type DoorOpts = { heavy: boolean?, color: Color3?, name: string?, window: boolean?, label: string?, locked: boolean? }
+
+function Builder.door(parent: Instance, cframe: CFrame, w: number, h: number, opts: DoorOpts?): Model
+	local o = opts or {}
+	local m = Builder.model(parent, o.name or "Door")
+	local thick = if o.heavy then 0.8 else 0.3
+	local color = o.color or (if o.heavy then Builder.Palette.StationOrangeDark else Builder.Palette.DirtyWhiteDark)
+	local hinge = Builder.part({ name = "Hinge", size = Vector3.new(0.3, h, 0.3), cframe = cframe * CFrame.new(-w / 2, h / 2, 0), material = Enum.Material.Metal, color = Builder.Palette.Graphite, parent = m, canCollide = false })
+	local leaf = Builder.part({ name = "Leaf", size = Vector3.new(w - 0.1, h - 0.1, thick), cframe = cframe * CFrame.new(0, h / 2, 0), material = if o.heavy then Enum.Material.Metal else Enum.Material.SmoothPlastic, color = color, parent = m })
+	leaf.CanCollide = true
+	local mod = Instance.new("PathfindingModifier")
+	mod.Label = if o.locked then "LockedDoor" else "Door"
+	mod.PassThrough = true
+	mod.Parent = leaf
+	-- Frame
+	Builder.part({ name = "FrameL", size = Vector3.new(0.3, h + 0.3, thick + 0.4), cframe = cframe * CFrame.new(-w / 2 - 0.15, h / 2, 0), material = Enum.Material.Metal, color = Builder.Palette.Graphite, parent = m })
+	Builder.part({ name = "FrameR", size = Vector3.new(0.3, h + 0.3, thick + 0.4), cframe = cframe * CFrame.new(w / 2 + 0.15, h / 2, 0), material = Enum.Material.Metal, color = Builder.Palette.Graphite, parent = m })
+	Builder.part({ name = "FrameT", size = Vector3.new(w + 0.6, 0.3, thick + 0.4), cframe = cframe * CFrame.new(0, h + 0.15, 0), material = Enum.Material.Metal, color = Builder.Palette.Graphite, parent = m })
+	if o.heavy then
+		local wheel = Builder.part({ name = "Wheel", size = Vector3.new(1.6, 1.6, 0.25), cframe = cframe * CFrame.new(w * 0.2, h * 0.5, thick / 2 + 0.2), shape = Enum.PartType.Cylinder, material = Enum.Material.Metal, color = Builder.Palette.Stainless, parent = m, canCollide = false })
+		wheel.CFrame = cframe * CFrame.new(w * 0.2, h * 0.5, thick / 2 + 0.2) * CFrame.Angles(0, math.pi / 2, 0)
+		local wheel2 = wheel:Clone()
+		wheel2.CFrame = cframe * CFrame.new(w * 0.2, h * 0.5, -thick / 2 - 0.2) * CFrame.Angles(0, math.pi / 2, 0)
+		wheel2.Parent = m
+		for i = 0, 2 do
+			Builder.part({ name = "Rib", size = Vector3.new(w - 0.4, 0.15, 0.1), cframe = cframe * CFrame.new(0, h * (0.25 + i * 0.25), thick / 2 + 0.05), material = Enum.Material.Metal, color = Builder.Palette.Graphite, parent = m, canCollide = false })
+		end
+		Builder.hazardStripes(m, cframe * CFrame.new(0, 0.05, 0) * CFrame.Angles(0, 0, 0), w + 1, 1.2)
+	else
+		Builder.part({ name = "Handle", size = Vector3.new(0.9, 0.15, 0.15), cframe = cframe * CFrame.new(w * 0.32, h * 0.47, thick / 2 + 0.12), material = Enum.Material.Metal, color = Builder.Palette.Stainless, parent = m, canCollide = false })
+		Builder.part({ name = "Handle2", size = Vector3.new(0.9, 0.15, 0.15), cframe = cframe * CFrame.new(w * 0.32, h * 0.47, -thick / 2 - 0.12), material = Enum.Material.Metal, color = Builder.Palette.Stainless, parent = m, canCollide = false })
+		if o.window then
+			Builder.part({ name = "Porthole", size = Vector3.new(1.2, 1.6, thick + 0.05), cframe = cframe * CFrame.new(-w * 0.1, h * 0.7, 0), material = Enum.Material.Glass, color = Builder.Palette.GlassTint, parent = m, transparency = 0.5, canCollide = false })
+		end
+	end
+	if o.label then
+		Builder.label(leaf, Enum.NormalId.Front, o.label, { textColor = Builder.Palette.WarningBlack, textSize = 28, bold = true, pixelsPerStud = 30 })
+	end
+	m:SetAttribute("Open", false)
+	m:SetAttribute("Locked", o.locked == true)
+	m:SetAttribute("Heavy", o.heavy == true)
+	m:SetAttribute("Width", w)
+	m:SetAttribute("Height", h)
+	m.PrimaryPart = leaf
+	-- Leaf rotates around the hinge; store its closed CFrame relative to the hinge.
+	m:SetAttribute("ClosedOffset", hinge.CFrame:ToObjectSpace(leaf.CFrame))
+	return m
+end
+
+-- Oil radiator / heater block.
+function Builder.heater(parent: Instance, cframe: CFrame, circuit: string, range: number): Part
+	local m = Builder.model(parent, "Heater")
+	local body = Builder.part({ name = "Body", size = Vector3.new(3.2, 2.2, 0.6), cframe = cframe * CFrame.new(0, 1.3, 0), material = Enum.Material.Metal, color = Builder.Palette.DirtyWhiteDark, parent = m })
+	for i = 0, 6 do
+		Builder.part({ name = "Fin", size = Vector3.new(0.3, 2.0, 0.8), cframe = cframe * CFrame.new(-1.35 + i * 0.45, 1.3, 0), material = Enum.Material.Metal, color = Builder.Palette.DirtyWhite, parent = m, canCollide = false })
+	end
+	local glow = Builder.part({ name = "Lamp", size = Vector3.new(0.3, 0.3, 0.1), cframe = cframe * CFrame.new(1.3, 2.2, 0.35), material = Enum.Material.Neon, color = Builder.Palette.Orange, parent = m, canCollide = false, castShadow = false })
+	Builder.pointLight(glow, Builder.Palette.Orange, 6, 0.4).Name = "Light"
+	Builder.registerLamp(glow, circuit, Builder.Palette.Orange, 0.4)
+	body:SetAttribute("Heater", true)
+	body:SetAttribute("Circuit", circuit)
+	body:SetAttribute("Range", range)
+	return body
+end
+
+-- Attachment-only FX anchor the client fills with particle emitters (snow,
+-- dust, steam) according to its quality settings. Server never emits.
+function Builder.fxAnchor(parent: Instance, name: string, cframe: CFrame, kind: string, size: Vector3?, attrs: { [string]: any }?): Part
+	local p = Builder.invisible(parent, name, cframe, size or Vector3.new(1, 1, 1))
+	p:SetAttribute("FX", kind)
+	if attrs then
+		for k, v in attrs do
+			p:SetAttribute(k, v)
+		end
+	end
 	return p
 end
 

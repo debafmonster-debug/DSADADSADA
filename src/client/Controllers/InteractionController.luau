@@ -78,7 +78,7 @@ local function build(prompt: ProximityPrompt)
 	Theme.corner(key, 3)
 	local keyLabel = Theme.label(key, keyText(prompt), 18, { Font = Theme.FontBold, TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Center, Size = UDim2.fromScale(1, 1) })
 	keyLabel.Name = "Key"
-	local obj = Theme.label(frame, prompt.ObjectText, 13, { TextColor3 = Theme.Colors.TextDim, Position = UDim2.new(0, 64, 0, 8), Size = UDim2.new(1, -72, 0, 16) })
+	Theme.label(frame, prompt.ObjectText, 13, { TextColor3 = Theme.Colors.TextDim, Position = UDim2.new(0, 64, 0, 8), Size = UDim2.new(1, -72, 0, 16) })
 	local act = Theme.label(frame, prompt.ActionText, 16, { Font = Theme.FontBold, Position = UDim2.new(0, 64, 0, 26), Size = UDim2.new(1, -72, 0, 20) })
 	-- Required-tool hint
 	local cap = prompt:GetAttribute("ToolCap")
@@ -96,9 +96,8 @@ local function build(prompt: ProximityPrompt)
 			hint.Name = "Hint"
 		end
 	end
-	if prompt:GetAttribute("UI") == "Door" and prompt.ActionText == "Заблокировано" then
+	if prompt.ActionText == "Заблокировано" then
 		act.TextColor3 = Theme.Colors.Danger
-		obj.Text = "Нужен допуск 03"
 	end
 	-- Hold progress bar
 	local bar = Theme.frame(frame, { Size = UDim2.new(0, 0, 0, 3), Position = UDim2.new(0, 0, 1, -3), BackgroundColor3 = Theme.Colors.Accent })
@@ -116,9 +115,13 @@ local function build(prompt: ProximityPrompt)
 		end
 		bar.Size = UDim2.new(0, 0, 0, 3)
 	end))
-	-- Keep text in sync (door Open/Close, etc.)
+	-- Keep text in sync (door Open/Close, generator steps, etc.)
 	table.insert(conns, prompt:GetPropertyChangedSignal("ActionText"):Connect(function()
 		act.Text = prompt.ActionText
+		act.TextColor3 = if prompt.ActionText == "Заблокировано" then Theme.Colors.Danger else Theme.Colors.Text
+	end))
+	table.insert(conns, prompt:GetPropertyChangedSignal("HoldDuration"):Connect(function()
+		applyHold(prompt)
 	end))
 	active[prompt] = gui
 	-- Mobile: tapping the billboard triggers the prompt.
@@ -159,10 +162,13 @@ function InteractionController.init()
 		end
 	end)
 	ProximityPromptService.PromptHidden:Connect(destroy)
+	-- Only these prompt kinds open a client screen; everything else is a
+	-- server-validated world interaction and needs no UI.
+	local clientUI = { RoomBoard = true, Equipment = true, Briefing = true, Archive = true, Registration = true, Radio = true, Keypad = true }
 	ProximityPromptService.PromptTriggered:Connect(function(prompt)
 		local ui = prompt:GetAttribute("UI")
 		Theme.playUISound("UIClick")
-		if ui and ui ~= "Task" and ui ~= "Door" and ui ~= "Revive" and ui ~= "Document" then
+		if ui and clientUI[ui] then
 			InteractionController.OpenUI:Fire(ui, prompt)
 		end
 	end)

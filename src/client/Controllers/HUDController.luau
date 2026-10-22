@@ -1,453 +1,537 @@
 --!nonstrict
--- In-shift HUD: objective & tasks, player status, notifications, subtitles,
--- team signals, downed overlay, briefing, results and document reader.
-local Players = game:GetService("Players")
+-- In-game HUD. Minimal by design: station clock and stage, task list, body
+-- temperature / stamina / battery, inventory, a four-light power strip,
+-- subtitles, notifications, headcount and evacuation banners, and the
+-- briefing / results / document modals. Everything it shows comes from
+-- server events; the only local values are stamina and the cosmetic battery.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
-local Tools = require(ReplicatedStorage.Shared.Config.Tools)
-local Signals = require(ReplicatedStorage.Shared.Config.Signals)
 local Net = require(ReplicatedStorage.Shared.Utilities.Net)
 local Signal = require(ReplicatedStorage.Shared.Utilities.Signal)
 local Theme = require(script.Parent.Parent.UI.Theme)
-local CameraController = require(script.Parent.CameraController)
 local SettingsStore = require(script.Parent.SettingsStore)
-
-local player = Players.LocalPlayer
-local C = Theme.Colors
+local CameraController = require(script.Parent.CameraController)
+local FlashlightController = require(script.Parent.FlashlightController)
 
 local HUDController = {}
 HUDController.PhaseChanged = Signal.new()
 HUDController.Phase = "Idle"
+HUDController.Flags = { heat = 100, bodyTemp = 36.6, coldStage = 0, downed = false }
 
 local gui: ScreenGui
-local objectiveLabel: TextLabel
-local taskList: Frame
-local statusFrame: Frame
-local healthBar: Frame
-local staminaBar: Frame
-local batteryBar: Frame
-local toolLabel: TextLabel
-local notifStack: Frame
-local subtitle: TextLabel
-local alarmBanner: Frame
-local evacLabel: TextLabel
-local downedOverlay: Frame
-local downedTimer: TextLabel
-local selfRescueBtn: TextButton
-local phaseLabel: TextLabel
-local teamFrame: Frame
-local mobileFrame: Frame
-local modalGui: ScreenGui
-local currentState = nil
+local objective, tasksList, clockLabel, stageLabel, titleLabel, teamList
+local statusPanel, tempFill, tempLabel, stamFill, batFill, batLabel, toolLabel, itemsFrame
+local notifications, subtitle, subtitleSpeaker, banner, bannerText, evacLabel, powerStrip, powerLights
+local downedOverlay, downedText
+local modalGui: ScreenGui? = nil
+local taskRows: { [string]: Frame } = {}
+local inventory = { items = {}, battery = 0, tool = nil }
+local subtitleQueue = {}
+local subtitleBusy = false
 
-local function bar(parent: Instance, name: string, color: Color3, y: number): Frame
-	local lbl = Theme.label(parent, name, 11, { TextColor3 = C.TextDim, Position = UDim2.new(0, 0, 0, y), Size = UDim2.new(1, 0, 0, 12) })
-	lbl.Name = name .. "Label"
-	local bg = Theme.frame(parent, { Position = UDim2.new(0, 0, 0, y + 13), Size = UDim2.new(1, 0, 0, 6), BackgroundColor3 = C.PanelAlt })
-	local fill = Theme.frame(bg, { Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = color })
-	fill.Name = "Fill"
-	return fill
-end
+-- ===== helpers ==========================================================
 
-local function buildStatus()
-	statusFrame = Theme.frame(gui, { Name = "Status", Position = UDim2.new(0, 20, 1, -20), AnchorPoint = Vector2.new(0, 1), Size = UDim2.new(0, 220, 0, 110), BackgroundColor3 = C.Bg, BackgroundTransparency = 0.35 })
-	Theme.stroke(statusFrame)
-	Theme.corner(statusFrame)
-	Theme.padding(statusFrame, 10)
-	healthBar = bar(statusFrame, "СОСТОЯНИЕ", C.Good, 0)
-	staminaBar = bar(statusFrame, "ВЫНОСЛИВОСТЬ", C.Info, 26)
-	batteryBar = bar(statusFrame, "ФОНАРЬ [F]", C.Accent, 52)
-	toolLabel = Theme.label(statusFrame, "", 12, { Position = UDim2.new(0, 0, 0, 78), Size = UDim2.new(1, 0, 0, 14), TextColor3 = C.Text })
-end
-
-local function buildObjective()
-	local panel = Theme.frame(gui, { Name = "Objective", Position = UDim2.new(0, 20, 0, 20), Size = UDim2.new(0, 340, 0, 40), BackgroundColor3 = C.Bg, BackgroundTransparency = 0.35, AutomaticSize = Enum.AutomaticSize.Y })
-	Theme.stroke(panel)
-	Theme.corner(panel)
-	Theme.padding(panel, 10)
-	Theme.list(panel, 4)
-	phaseLabel = Theme.label(panel, "", 11, { TextColor3 = C.Accent, Font = Theme.FontBold, LayoutOrder = 0 })
-	objectiveLabel = Theme.label(panel, "", 16, { Font = Theme.FontBold, LayoutOrder = 1, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0) })
-	taskList = Theme.frame(panel, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 2 })
-	Theme.list(taskList, 3)
-	evacLabel = Theme.label(panel, "", 14, { TextColor3 = C.Good, Font = Theme.FontBold, LayoutOrder = 3 })
-	teamFrame = Theme.frame(panel, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 4 })
-	Theme.list(teamFrame, 2)
-end
-
-local function buildNotifications()
-	notifStack = Theme.frame(gui, { Name = "Notifications", Position = UDim2.new(1, -20, 0, 20), AnchorPoint = Vector2.new(1, 0), Size = UDim2.new(0, 320, 0, 0), BackgroundTransparency = 1, AutomaticSize = Enum.AutomaticSize.Y })
-	Theme.list(notifStack, 6)
-	subtitle = Theme.label(gui, "", 16, { Position = UDim2.new(0.5, 0, 1, -150), AnchorPoint = Vector2.new(0.5, 1), Size = UDim2.new(0, 600, 0, 24), TextXAlignment = Enum.TextXAlignment.Center, TextStrokeTransparency = 0.4, TextStrokeColor3 = Color3.new(0, 0, 0), Font = Theme.FontBold })
-	alarmBanner = Theme.frame(gui, { Name = "Alarm", Position = UDim2.new(0.5, 0, 0, 20), AnchorPoint = Vector2.new(0.5, 0), Size = UDim2.new(0, 360, 0, 30), BackgroundColor3 = C.Danger, BackgroundTransparency = 0.2, Visible = false })
-	Theme.corner(alarmBanner)
-	Theme.label(alarmBanner, "⚠ АВАРИЙНЫЙ РЕЖИМ · НАРУШЕНИЕ ИЗОЛЯЦИИ", 14, { Font = Theme.FontBold, TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Center, Size = UDim2.fromScale(1, 1) })
-end
-
-local function buildDowned()
-	downedOverlay = Theme.frame(gui, { Name = "Downed", BackgroundColor3 = Color3.fromRGB(60, 0, 0), BackgroundTransparency = 0.55, Visible = false, ZIndex = 5 })
-	local grad = Instance.new("UIGradient")
-	grad.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.5, 0.9), NumberSequenceKeypoint.new(1, 0) })
-	grad.Rotation = 90
-	grad.Parent = downedOverlay
-	local box = Theme.frame(downedOverlay, { Position = UDim2.new(0.5, 0, 0.72, 0), AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.new(0, 360, 0, 120), BackgroundColor3 = C.Bg, BackgroundTransparency = 0.2, ZIndex = 6 })
-	Theme.stroke(box, C.Danger, 2)
-	Theme.corner(box)
-	Theme.padding(box, 12)
-	Theme.label(box, "ВЫ ВЫВЕДЕНЫ ИЗ СТРОЯ", 18, { Font = Theme.FontBold, TextColor3 = C.Danger, TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 7 })
-	downedTimer = Theme.label(box, "", 14, { Position = UDim2.new(0, 0, 0, 28), TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 7 })
-	selfRescueBtn = Theme.button(box, "ИНЪЕКЦИЯ (самоспасение)", function()
-		local r = Net.func("RescueAction"):InvokeServer("self")
-		if r and r.ok then
-			selfRescueBtn.Active = false
-			selfRescueBtn.Text = "ИНЪЕКЦИЯ ДЕЙСТВУЕТ..."
-		elseif r then
-			HUDController.Notify({ title = "Инъекция", text = tostring(r.reason), kind = "warn" })
-		end
-	end, { Position = UDim2.new(0, 0, 1, -38), Size = UDim2.new(1, 0, 0, 36), ZIndex = 7 })
-end
-
-local function buildMobile()
-	if not Theme.isMobile() then
-		return
+local function closeModal()
+	if modalGui then
+		modalGui:Destroy()
+		modalGui = nil
+		CameraController.Unlock("modal")
 	end
-	mobileFrame = Theme.frame(gui, { Name = "Mobile", Position = UDim2.new(1, -20, 1, -20), AnchorPoint = Vector2.new(1, 1), Size = UDim2.new(0, 70, 0, 230), BackgroundTransparency = 1 })
-	Theme.list(mobileFrame, 8)
-	local function mb(text, fn, hold)
-		local b = Theme.button(mobileFrame, text, nil, { Size = UDim2.new(1, 0, 0, 66), BackgroundColor3 = C.Bg })
-		if hold then
-			b.MouseButton1Down:Connect(function()
-				fn(true)
-			end)
-			b.MouseButton1Up:Connect(function()
-				fn(false)
-			end)
-		else
-			b.Activated:Connect(fn)
-		end
-		return b
-	end
-	mb("БЕГ", function(on)
-		CameraController.ToggleSprint(on)
-	end, true)
-	mb("ПРИСЕСТЬ", function()
-		CameraController.ToggleCrouch()
-	end)
-	mb("ФОНАРЬ", function()
-		CameraController.ToggleFlashlight()
-	end)
 end
 
-function HUDController.Notify(n: { title: string, text: string, kind: string? })
-	local color = if n.kind == "danger" then C.Danger elseif n.kind == "warn" then C.Accent elseif n.kind == "good" then C.Good elseif n.kind == "terminal" then C.Terminal elseif n.kind == "story" then Color3.fromRGB(190, 160, 255) else C.Info
-	local card = Theme.frame(notifStack, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.Bg, BackgroundTransparency = 0.2 })
-	Theme.stroke(card, color)
-	Theme.corner(card)
-	Theme.padding(card, 10)
-	local accent = Theme.frame(card, { Size = UDim2.new(0, 3, 1, 0), Position = UDim2.new(0, -10, 0, 0), BackgroundColor3 = color })
-	accent.Name = "Accent"
-	Theme.label(card, n.title, 13, { Font = Theme.FontBold, TextColor3 = color })
-	Theme.label(card, n.text, 13, { Position = UDim2.new(0, 0, 0, 18), Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Font = if n.kind == "terminal" then Theme.FontMono else Theme.Font })
+local function openModal(title: string, w: number, h: number): Frame
+	closeModal()
+	modalGui = Theme.screen("V9_Modal", 50)
+	CameraController.Lock("modal")
+	local body = Theme.modal(modalGui, title, w, h, function()
+		closeModal()
+	end)
+	return body
+end
+
+function HUDController.Notify(n: { title: string, text: string?, kind: string? })
+	local color = Theme.Colors.Info
 	if n.kind == "danger" then
-		Theme.playUISound("UIError")
-	elseif n.kind == "good" or n.kind == "story" then
-		Theme.playUISound("UIConfirm")
+		color = Theme.Colors.Danger
+	elseif n.kind == "warn" then
+		color = Theme.Colors.Warm
+	elseif n.kind == "good" then
+		color = Theme.Colors.Good
+	elseif n.kind == "story" then
+		color = Theme.Colors.Terminal
 	end
-	task.delay(if n.kind == "terminal" then 12 else 6, function()
-		Theme.tween(card, { BackgroundTransparency = 1 }, 0.4)
-		task.wait(0.4)
-		card:Destroy()
-	end)
-	if #notifStack:GetChildren() > 7 then
-		for _, ch in notifStack:GetChildren() do
-			if ch:IsA("Frame") then
-				ch:Destroy()
+	local card = Theme.frame(notifications, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = Theme.Colors.Panel, BackgroundTransparency = 0.15 })
+	Theme.stroke(card, color)
+	Theme.corner(card, 3)
+	Theme.padding(card, 8)
+	Theme.list(card, 2)
+	Theme.label(card, n.title, 14, { Font = Theme.FontBold, TextColor3 = color, Size = UDim2.new(1, 0, 0, 18) })
+	if n.text and n.text ~= "" then
+		Theme.label(card, n.text, 13, { TextColor3 = Theme.Colors.Text, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0) })
+	end
+	local children = notifications:GetChildren()
+	local count = 0
+	for _, c in children do
+		if c:IsA("Frame") then
+			count += 1
+		end
+	end
+	if count > 6 then
+		for _, c in children do
+			if c:IsA("Frame") then
+				c:Destroy()
 				break
 			end
 		end
 	end
+	task.delay(if n.kind == "story" then 10 else 6, function()
+		if card.Parent then
+			Theme.tween(card, { BackgroundTransparency = 1 }, 0.4)
+			task.wait(0.4)
+			card:Destroy()
+		end
+	end)
+	if n.kind == "danger" then
+		Theme.playUISound("UIError")
+	elseif n.kind == "good" then
+		Theme.playUISound("UIConfirm")
+	end
 end
 
-local subtitleThread: thread? = nil
-function HUDController.Subtitle(text: string, seconds: number?)
-	if not SettingsStore.Current.subtitles then
+local function showSubtitle(speaker: string?, text: string, seconds: number)
+	subtitleSpeaker.Text = if speaker then string.upper(speaker) else ""
+	subtitle.Text = text
+	subtitle.Visible = true
+	subtitleSpeaker.Visible = speaker ~= nil
+	task.wait(seconds)
+	subtitle.Visible = false
+	subtitleSpeaker.Visible = false
+end
+
+local function pumpSubtitles()
+	if subtitleBusy then
 		return
 	end
-	subtitle.Text = text
-	if subtitleThread then
-		task.cancel(subtitleThread)
-	end
-	subtitleThread = task.delay(seconds or 3, function()
-		subtitle.Text = ""
-	end)
-end
-
-function HUDController.Signal(s)
-	local def = Signals.ById[s.id]
-	local color = if def then def.color else C.Info
-	HUDController.Notify({ title = s.sender, text = "«" .. s.text .. "»", kind = "info" })
-	HUDController.Subtitle(string.format("%s: %s", s.sender, s.text), 4)
-	-- World marker at the sender's position (what the sender knows: where they are).
-	if s.position and s.senderId ~= player.UserId then
-		local part = Instance.new("Part")
-		part.Anchored = true
-		part.CanCollide = false
-		part.Transparency = 1
-		part.Size = Vector3.new(1, 1, 1)
-		part.Position = s.position + Vector3.new(0, 3, 0)
-		part.Parent = workspace.CurrentCamera
-		local bb = Instance.new("BillboardGui")
-		bb.Size = UDim2.new(0, 180, 0, 40)
-		bb.AlwaysOnTop = true
-		bb.MaxDistance = 400
-		bb.Parent = part
-		local f = Theme.frame(bb, { BackgroundColor3 = C.Bg, BackgroundTransparency = 0.3 })
-		Theme.stroke(f, color, 1.5)
-		Theme.corner(f)
-		Theme.label(f, s.sender .. ": " .. s.text, 13, { TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Center, Size = UDim2.fromScale(1, 1), Font = Theme.FontBold, TextColor3 = color })
-		task.delay(s.lifetime or 6, function()
-			part:Destroy()
-		end)
-	end
-end
-
-local function renderTasks(tasks)
-	for _, ch in taskList:GetChildren() do
-		if ch:IsA("Frame") then
-			ch:Destroy()
-		end
-	end
-	table.sort(tasks, function(a, b)
-		return (a.isMain and 0 or 1) < (b.isMain and 0 or 1)
-	end)
-	for i, t in tasks do
-		local row = Theme.frame(taskList, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = i })
-		local done = t.status == "complete"
-		local color = if done then C.Good elseif t.isMain then C.Text else C.TextDim
-		Theme.label(row, string.format("%s %s%s", if done then "■" else "□", if t.isMain then "" else "(доп.) ", t.label), 13, { TextColor3 = color, Size = UDim2.new(1, 0, 0, 16) })
-		if not done then
-			local bg = Theme.frame(row, { Position = UDim2.new(0, 0, 0, 18), Size = UDim2.new(1, 0, 0, 3), BackgroundColor3 = C.PanelAlt })
-			Theme.frame(bg, { Size = UDim2.new(math.clamp(t.progress or 0, 0, 1), 0, 1, 0), BackgroundColor3 = C.Accent })
-			if t.hint and t.hint ~= "" then
-				Theme.label(row, t.hint, 11, { TextColor3 = C.TextDim, Position = UDim2.new(0, 0, 0, 24), Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
+	subtitleBusy = true
+	task.spawn(function()
+		while #subtitleQueue > 0 do
+			local line = table.remove(subtitleQueue, 1)
+			if SettingsStore.Current.subtitles then
+				showSubtitle(line.speaker, line.text, line.seconds)
+			else
+				task.wait(line.seconds)
+			end
+			if line.pauseAfter then
+				task.wait(line.pauseAfter)
 			end
 		end
+		subtitleBusy = false
+	end)
+end
+
+function HUDController.Subtitle(text: string, seconds: number?, speaker: string?)
+	table.insert(subtitleQueue, { speaker = speaker, text = text, seconds = seconds or 3 })
+	pumpSubtitles()
+end
+
+function HUDController.Lines(lines)
+	for _, l in lines do
+		table.insert(subtitleQueue, { speaker = l.speaker, text = l.text, seconds = l.seconds, pauseAfter = l.pauseAfter })
+	end
+	pumpSubtitles()
+end
+
+local function setBanner(text: string?, color: Color3?)
+	if text then
+		bannerText.Text = text
+		bannerText.TextColor3 = color or Theme.Colors.Accent
+		banner.Visible = true
+	else
+		banner.Visible = false
 	end
 end
 
-local function renderTeam(players)
-	for _, ch in teamFrame:GetChildren() do
-		if ch:IsA("TextLabel") then
-			ch:Destroy()
+-- ===== build ============================================================
+
+local function buildTaskRow(t)
+	local row = Theme.frame(tasksList, { Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1 })
+	local mark = Theme.label(row, "○", 14, { Size = UDim2.new(0, 16, 0, 18), TextColor3 = Theme.Colors.TextDim })
+	mark.Name = "Mark"
+	local lbl = Theme.label(row, t.label, 13, { Position = UDim2.new(0, 18, 0, 0), Size = UDim2.new(1, -18, 0, 18) })
+	lbl.Name = "Label"
+	local hint = Theme.label(row, t.hint or "", 11, { Position = UDim2.new(0, 18, 0, 17), Size = UDim2.new(1, -18, 0, 14), TextColor3 = Theme.Colors.TextDim })
+	hint.Name = "Hint"
+	local track = Theme.frame(row, { Position = UDim2.new(0, 18, 1, -3), Size = UDim2.new(1, -18, 0, 2), BackgroundColor3 = Theme.Colors.PanelAlt })
+	local fill = Theme.frame(track, { Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = Theme.Colors.Accent })
+	fill.Name = "Fill"
+	row.Name = t.id
+	return row
+end
+
+local function applyTask(t)
+	local row = taskRows[t.id]
+	if not row then
+		row = buildTaskRow(t)
+		taskRows[t.id] = row
+	end
+	local mark = row:FindFirstChild("Mark")
+	local lbl = row:FindFirstChild("Label")
+	local hint = row:FindFirstChild("Hint")
+	local fill = row:FindFirstChild("Fill", true)
+	if t.status == "complete" then
+		mark.Text = "■"
+		mark.TextColor3 = Theme.Colors.Good
+		lbl.TextColor3 = Theme.Colors.TextDim
+		hint.Text = ""
+	else
+		mark.Text = if t.optional then "◇" else "○"
+		mark.TextColor3 = if t.optional then Theme.Colors.TextDim else Theme.Colors.Accent
+		lbl.TextColor3 = Theme.Colors.Text
+		hint.Text = t.hint or ""
+	end
+	lbl.Text = t.label .. (if t.optional then "  (доп.)" else "")
+	fill.Size = UDim2.new(math.clamp(t.progress or 0, 0, 1), 0, 1, 0)
+	row.LayoutOrder = if t.status == "complete" then 100 else (if t.optional then 50 else 0)
+end
+
+local function rebuildItems()
+	for _, c in itemsFrame:GetChildren() do
+		if c:IsA("Frame") or c:IsA("TextButton") then
+			c:Destroy()
 		end
 	end
-	if not players or #players <= 1 then
-		return
+	for i, it in inventory.items do
+		local usable = it.id == "Battery" or it.id == "Medkit"
+		local text = string.format("%s ×%d", it.name, it.count)
+		if usable then
+			local b = Theme.button(itemsFrame, text .. "  [" .. tostring(i) .. "]", function()
+				task.spawn(function()
+					local ok, res = pcall(function()
+						return Net.func("InventoryUse"):InvokeServer(it.id)
+					end)
+					if ok and res and res.ok then
+						HUDController.Notify({ title = "Использовано", text = res.data, kind = "good" })
+					elseif ok and res then
+						HUDController.Notify({ title = "Нельзя", text = res.reason, kind = "warn" })
+					end
+				end)
+			end, { Size = UDim2.new(1, 0, 0, 22), TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left })
+			Theme.padding(b, 6)
+			b.LayoutOrder = i
+		else
+			local l = Theme.label(itemsFrame, "▪ " .. text, 12, { Size = UDim2.new(1, 0, 0, 16), TextColor3 = Theme.Colors.TextDim })
+			l.LayoutOrder = i
+		end
 	end
-	for i, p in players do
-		local status = if p.eliminated then "✕" elseif p.downed then "▼" elseif p.evacuated then "✓" else "●"
-		local color = if p.eliminated then C.TextDim elseif p.downed then C.Danger elseif p.evacuated then C.Good else C.Text
-		Theme.label(teamFrame, status .. " " .. p.name, 12, { TextColor3 = color, LayoutOrder = i, Size = UDim2.new(1, 0, 0, 14) })
+end
+
+local function build()
+	gui = Theme.screen("V9_HUD", 10)
+	gui.Enabled = false
+	-- Objective panel (top-left): title, station clock, stage, tasks, team.
+	objective = Theme.frame(gui, { Position = UDim2.new(0, 16, 0, 16 + Theme.safeTop()), Size = UDim2.new(0, 330, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = Theme.Colors.Bg, BackgroundTransparency = 0.3 })
+	Theme.stroke(objective)
+	Theme.corner(objective, 3)
+	Theme.padding(objective, 10)
+	Theme.list(objective, 4)
+	local head = Theme.frame(objective, { Size = UDim2.new(1, 0, 0, 44), BackgroundTransparency = 1, LayoutOrder = 0 })
+	clockLabel = Theme.label(head, "--:--", 34, { Font = Theme.FontMono, Size = UDim2.new(0, 120, 0, 40), TextColor3 = Theme.Colors.Accent })
+	titleLabel = Theme.label(head, "", 13, { Position = UDim2.new(0, 124, 0, 2), Size = UDim2.new(1, -124, 0, 16), Font = Theme.FontBold })
+	stageLabel = Theme.label(head, "", 12, { Position = UDim2.new(0, 124, 0, 20), Size = UDim2.new(1, -124, 0, 16), TextColor3 = Theme.Colors.TextDim })
+	tasksList = Theme.frame(objective, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 1 })
+	Theme.list(tasksList, 2)
+	teamList = Theme.label(objective, "", 11, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, TextColor3 = Theme.Colors.TextDim, LayoutOrder = 2 })
+	-- Status panel (bottom-left).
+	statusPanel = Theme.frame(gui, { Position = UDim2.new(0, 16, 1, -16), AnchorPoint = Vector2.new(0, 1), Size = UDim2.new(0, 250, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = Theme.Colors.Bg, BackgroundTransparency = 0.3 })
+	Theme.stroke(statusPanel)
+	Theme.corner(statusPanel, 3)
+	Theme.padding(statusPanel, 10)
+	local bars = Theme.frame(statusPanel, { Size = UDim2.new(1, 0, 0, 86), BackgroundTransparency = 1 })
+	tempFill, tempLabel = Theme.bar(bars, "ТЕМПЕРАТУРА ТЕЛА  36.6 °C", Theme.Colors.Accent, 0, 230)
+	stamFill = Theme.bar(bars, "ВЫНОСЛИВОСТЬ", Theme.Colors.Good, 28, 230)
+	batFill, batLabel = Theme.bar(bars, "ФОНАРЬ [F]", Theme.Colors.Warm, 56, 230)
+	toolLabel = Theme.label(statusPanel, "", 12, { Position = UDim2.new(0, 0, 0, 90), Size = UDim2.new(1, 0, 0, 16), Font = Theme.FontBold })
+	itemsFrame = Theme.frame(statusPanel, { Position = UDim2.new(0, 0, 0, 108), Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1 })
+	Theme.list(itemsFrame, 2)
+	-- Power strip (bottom-right): four small indicator lights.
+	powerStrip = Theme.frame(gui, { Position = UDim2.new(1, -16, 1, -16), AnchorPoint = Vector2.new(1, 1), Size = UDim2.new(0, 230, 0, 30), BackgroundColor3 = Theme.Colors.Bg, BackgroundTransparency = 0.3 })
+	Theme.stroke(powerStrip)
+	Theme.corner(powerStrip, 3)
+	Theme.list(powerStrip, 6, true)
+	Theme.padding(powerStrip, 6)
+	powerLights = {}
+	for _, def in { { "ГЕН", "gen" }, { "ОТОП", "Heating" }, { "СВЯЗЬ", "Radio" }, { "СКАН", "Scanner" }, { "СВЕТ", "LightsMain" } } do
+		local cell = Theme.frame(powerStrip, { Size = UDim2.new(0, 40, 1, 0), BackgroundTransparency = 1 })
+		local dot = Theme.frame(cell, { Size = UDim2.new(0, 8, 0, 8), Position = UDim2.new(0, 0, 0.5, -4), BackgroundColor3 = Theme.Colors.TextDim })
+		Theme.corner(dot, 4)
+		Theme.label(cell, def[1], 10, { Position = UDim2.new(0, 11, 0, 0), Size = UDim2.new(1, -11, 1, 0), TextYAlignment = Enum.TextYAlignment.Center, TextColor3 = Theme.Colors.TextDim })
+		powerLights[def[2]] = dot
+	end
+	-- Notifications (top-right).
+	notifications = Theme.frame(gui, { Position = UDim2.new(1, -16, 0, 16 + Theme.safeTop()), AnchorPoint = Vector2.new(1, 0), Size = UDim2.new(0, 320, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1 })
+	Theme.list(notifications, 6)
+	-- Subtitles (bottom-center).
+	subtitleSpeaker = Theme.label(gui, "", 12, { Position = UDim2.new(0.5, 0, 1, -170), AnchorPoint = Vector2.new(0.5, 1), Size = UDim2.new(0, 700, 0, 16), TextXAlignment = Enum.TextXAlignment.Center, TextColor3 = Theme.Colors.Accent, Font = Theme.FontBold, Visible = false })
+	subtitle = Theme.label(gui, "", 18, { Position = UDim2.new(0.5, 0, 1, -120), AnchorPoint = Vector2.new(0.5, 1), Size = UDim2.new(0, 760, 0, 50), TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Center, Visible = false, TextStrokeTransparency = 0.4 })
+	-- Banner (top-center): night rule, headcount, evacuation.
+	banner = Theme.frame(gui, { Position = UDim2.new(0.5, 0, 0, 16 + Theme.safeTop()), AnchorPoint = Vector2.new(0.5, 0), Size = UDim2.new(0, 460, 0, 34), BackgroundColor3 = Theme.Colors.Bg, BackgroundTransparency = 0.25, Visible = false })
+	Theme.stroke(banner, Theme.Colors.Border)
+	Theme.corner(banner, 3)
+	bannerText = Theme.label(banner, "", 15, { Size = UDim2.new(1, 0, 1, 0), TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Center, Font = Theme.FontBold })
+	evacLabel = Theme.label(gui, "", 13, { Position = UDim2.new(0.5, 0, 0, 56 + Theme.safeTop()), AnchorPoint = Vector2.new(0.5, 0), Size = UDim2.new(0, 460, 0, 18), TextXAlignment = Enum.TextXAlignment.Center, TextColor3 = Theme.Colors.TextDim, Visible = false })
+	-- Downed overlay.
+	downedOverlay = Theme.frame(gui, { BackgroundColor3 = Color3.fromRGB(40, 8, 8), BackgroundTransparency = 0.55, Visible = false })
+	local grad = Instance.new("UIGradient")
+	grad.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.5, 0.7), NumberSequenceKeypoint.new(1, 0) })
+	grad.Rotation = 90
+	grad.Parent = downedOverlay
+	downedText = Theme.label(downedOverlay, "", 20, { Position = UDim2.new(0.5, 0, 0.6, 0), AnchorPoint = Vector2.new(0.5, 0), Size = UDim2.new(0, 600, 0, 60), TextXAlignment = Enum.TextXAlignment.Center, Font = Theme.FontBold })
+	local selfBtn = Theme.button(downedOverlay, "ПОПЫТАТЬСЯ ВСТАТЬ", function()
+		task.spawn(function()
+			local ok, res = pcall(function()
+				return Net.func("RescueAction"):InvokeServer("self")
+			end)
+			if ok and res and not res.ok then
+				HUDController.Notify({ title = "Не получается", text = res.reason, kind = "warn" })
+			end
+		end)
+	end, { Position = UDim2.new(0.5, 0, 0.6, 70), AnchorPoint = Vector2.new(0.5, 0), Size = UDim2.new(0, 260, 0, 36) })
+	selfBtn.Name = "SelfRescue"
+	-- Mobile controls.
+	if Theme.isMobile() then
+		local col = Theme.frame(gui, { Position = UDim2.new(1, -16, 1, -60), AnchorPoint = Vector2.new(1, 1), Size = UDim2.new(0, 110, 0, 150), BackgroundTransparency = 1 })
+		Theme.list(col, 6)
+		local run = Theme.button(col, "БЕГ", nil, { Size = UDim2.new(1, 0, 0, 44) })
+		run.MouseButton1Down:Connect(function()
+			CameraController.ToggleSprint(true)
+		end)
+		run.MouseButton1Up:Connect(function()
+			CameraController.ToggleSprint(false)
+		end)
+		Theme.button(col, "ПРИСЕСТЬ", function()
+			CameraController.ToggleCrouch()
+		end, { Size = UDim2.new(1, 0, 0, 44) })
+		Theme.button(col, "ФОНАРЬ", function()
+			FlashlightController.Toggle()
+		end, { Size = UDim2.new(1, 0, 0, 44) })
+	end
+end
+
+-- ===== state application ====================================================
+
+local function applyFlags(f)
+	for k, v in f do
+		HUDController.Flags[k] = v
+	end
+	local F = HUDController.Flags
+	if f.heat ~= nil then
+		tempFill.Size = UDim2.new(math.clamp(F.heat / GameConfig.Temperature.Max, 0, 1), 0, 1, 0)
+		tempLabel.Text = string.format("ТЕМПЕРАТУРА ТЕЛА  %.1f °C", F.bodyTemp or 36.6)
+		local color = if (F.coldStage or 0) >= 2 then Theme.Colors.Danger elseif (F.coldStage or 0) == 1 then Theme.Colors.Warm else Theme.Colors.Accent
+		tempFill.BackgroundColor3 = color
+	end
+	if f.downed ~= nil then
+		downedOverlay.Visible = F.downed and not F.eliminated
+		CameraController.SetDowned(F.downed == true)
+		if F.downed then
+			FlashlightController.ForceOff()
+		end
+	end
+	if F.eliminated then
+		downedOverlay.Visible = false
+	end
+	if F.downed then
+		local reason = if F.downedReason == "cold" then "Вы замерзаете. Нужно тепло или аптечка." else "Вы выведены из строя. Ждите помощи."
+		downedText.Text = string.format("%s\n%d с", reason, math.floor(F.downedSeconds or 0))
+		local btn = downedOverlay:FindFirstChild("SelfRescue")
+		if btn then
+			btn.Visible = (F.selfRescueCharges or 0) > 0 and not F.selfRescuing
+		end
 	end
 end
 
 function HUDController.ApplyRoundState(state)
-	currentState = state
-	local phase = state.phase or "Idle"
-	if phase ~= HUDController.Phase then
-		HUDController.Phase = phase
-		HUDController.PhaseChanged:Fire(phase)
+	local prev = HUDController.Phase
+	HUDController.Phase = state.phase
+	gui.Enabled = state.phase ~= "Idle" and state.phase ~= "Boarding"
+	if prev ~= state.phase then
+		HUDController.PhaseChanged:Fire(state.phase, prev)
 	end
-	local inShift = phase ~= "Idle"
-	gui.Enabled = true
-	statusFrame.Visible = inShift
-	local objectivePanel = gui:FindFirstChild("Objective") :: Frame
-	objectivePanel.Visible = inShift
-	if mobileFrame then
-		mobileFrame.Visible = inShift
-	end
-	if not inShift then
-		alarmBanner.Visible = false
+	if state.phase == "Idle" then
+		for id, row in taskRows do
+			row:Destroy()
+			taskRows[id] = nil
+		end
+		setBanner(nil)
 		downedOverlay.Visible = false
+		closeModal()
 		return
 	end
-	local phaseNames = { Prep = "ПРИБЫТИЕ", Briefing = "БРИФИНГ", Active = "СМЕНА", Evacuation = "ЭВАКУАЦИЯ", Results = "ОТЧЁТ" }
-	local minutes = math.floor((state.elapsed or 0) / 60)
-	local seconds = math.floor((state.elapsed or 0) % 60)
-	phaseLabel.Text = string.format("%s · %s · %02d:%02d · seed %s", phaseNames[phase] or phase, state.title or "", minutes, seconds, tostring(state.seed))
-	objectiveLabel.Text = state.objective or ""
-	renderTasks(state.tasks or {})
-	renderTeam(state.players)
-	alarmBanner.Visible = state.incident == true and phase ~= "Results"
-	if state.evacCountdown then
-		evacLabel.Text = string.format("Шлюз откроется через %d с", math.ceil(state.evacCountdown))
-	elseif state.shutterOpen then
-		evacLabel.Text = "ШЛЮЗ ОТКРЫТ — на площадку E-1"
+	titleLabel.Text = state.title or ""
+	local stageNames = { Arrival = "Прибытие", Exploration = "Вечерняя смена", Incident = "Инцидент", Escalation = "Обстановка ухудшается", NightPrep = "Подготовка к ночи", Night = "Ночь · регламент", Dawn = "Рассвет · эвакуация", Results = "Итоги", Boarding = "Посадка" }
+	stageLabel.Text = stageNames[state.stage] or state.stage or ""
+	if state.tasks then
+		for _, t in state.tasks do
+			applyTask(t)
+		end
+	end
+	if state.clock then
+		clockLabel.Text = state.clock.text
+		clockLabel.TextColor3 = if state.clock.night then Theme.Colors.Danger else Theme.Colors.Accent
+	end
+	if state.players and #state.players > 1 then
+		local lines = {}
+		for _, p in state.players do
+			local status = if p.eliminated then "потерян" elseif p.downed then "НУЖНА ПОМОЩЬ" elseif p.evacuated then "на борту" elseif not p.present then "вне связи" else string.format("%d%%", p.heat or 100)
+			table.insert(lines, p.name .. " — " .. status)
+		end
+		teamList.Text = table.concat(lines, "\n")
 	else
-		evacLabel.Text = ""
+		teamList.Text = ""
+	end
+	if state.phase == "Evacuation" and state.evacCountdown then
+		setBanner(string.format("БОРТ НА ПЛОЩАДКЕ · %d с", state.evacCountdown), Theme.Colors.Good)
+		evacLabel.Text = "Идите к огням площадки (северо-запад от К-1)"
+		evacLabel.Visible = true
+	elseif state.stage == "Night" then
+		setBanner("22:00 — НЕ ПОКИДАЙТЕ СПАЛЬНЫЙ СЕКТОР", Theme.Colors.Danger)
+		evacLabel.Visible = false
+	elseif state.stage == "NightPrep" then
+		setBanner("СКОРО 22:00 · ГЕНЕРАТОР · КРЫШКА · ЛЮДИ", Theme.Colors.Warm)
+		evacLabel.Visible = false
+	else
+		setBanner(nil)
+		evacLabel.Visible = false
 	end
 end
 
 function HUDController.ShowBriefing(b)
-	if modalGui then
-		modalGui:Destroy()
-	end
-	modalGui = Theme.screen("NS_Modal", 50)
-	local body, dim = Theme.modal(modalGui, "Брифинг · " .. b.title, 640, 460)
+	local body = openModal("Брифинг · " .. (b.title or ""), 640, 460)
 	local scroll = Theme.scroll(body)
-	Theme.list(scroll, 6)
-	Theme.label(scroll, string.format("<b>Тип:</b> %s   <b>Опасность:</b> %s", b.kind, b.danger), 14, { TextColor3 = C.TextDim })
-	Theme.header(scroll, "Цель смены")
-	Theme.label(scroll, "• " .. b.mainTask, 15, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-	if b.optionalTask then
-		Theme.label(scroll, "• (доп.) " .. b.optionalTask, 15, { TextColor3 = C.TextDim, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
+	Theme.list(scroll, 8)
+	Theme.label(scroll, string.format("%s · опасность: %s", b.kind or "", b.danger or ""), 13, { TextColor3 = Theme.Colors.TextDim })
+	Theme.header(scroll, "Обстановка")
+	for _, line in b.briefing or {} do
+		Theme.label(scroll, line, 14, { AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0) })
 	end
-	Theme.header(scroll, "Сводка диспетчера")
-	for _, line in b.briefing do
-		Theme.label(scroll, line, 14, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
+	Theme.header(scroll, "Задачи")
+	for _, t in b.tasks or {} do
+		Theme.label(scroll, (if t.optional then "◇ " else "○ ") .. t.label, 14)
 	end
-	Theme.header(scroll, "Предупреждения")
-	for _, line in b.warnings do
-		Theme.label(scroll, "! " .. line, 14, { TextColor3 = C.Accent, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
+	Theme.header(scroll, "Регламент")
+	for _, w in b.warnings or {} do
+		Theme.label(scroll, "! " .. w, 13, { TextColor3 = Theme.Colors.Warm, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0) })
 	end
-	Theme.header(scroll, "Эвакуация")
-	Theme.label(scroll, b.evacuation, 14)
-	local countdown = Theme.label(body, "", 13, { Position = UDim2.new(0, 0, 1, -18), Size = UDim2.new(1, 0, 0, 18), TextColor3 = C.TextDim, TextXAlignment = Enum.TextXAlignment.Right })
-	task.spawn(function()
-		local t = (b.seconds or 10) + GameConfig.Round.PrepSeconds
-		while t > 0 and dim.Parent do
-			countdown.Text = string.format("Начало через %d с", t)
-			task.wait(1)
-			t -= 1
-		end
-		if dim.Parent then
-			dim:Destroy()
-		end
-	end)
+	Theme.button(scroll, "ПРИНЯТО", closeModal)
+	if b.seconds then
+		task.delay(b.seconds, function()
+			if modalGui and modalGui.Parent then
+				closeModal()
+			end
+		end)
+	end
 end
 
 function HUDController.ShowResults(r)
-	if modalGui then
-		modalGui:Destroy()
+	local body = openModal(if r.success then "Смена завершена" else "Смена провалена", 560, 440)
+	Theme.list(body, 6)
+	Theme.label(body, r.reason or "", 15, { Font = Theme.FontBold, TextColor3 = if r.success then Theme.Colors.Good else Theme.Colors.Danger })
+	Theme.label(body, string.format("%s · %d мин · документов: %d · ночь: %s", r.title or "", math.floor((r.duration or 0) / 60), r.documents or 0, if r.nightSurvived then "пережита" else "—"), 12, { TextColor3 = Theme.Colors.TextDim })
+	Theme.header(body, "Начисления")
+	for _, line in r.lines or {} do
+		Theme.label(body, string.format("%s  %s%d", line.label, if line.value >= 0 then "+" else "", line.value), 14)
 	end
-	modalGui = Theme.screen("NS_Modal", 50)
-	local body = Theme.modal(modalGui, if r.success then "Смена завершена" else "Смена провалена", 520, 420)
-	local scroll = Theme.scroll(body, { Size = UDim2.new(1, 0, 1, -50) })
-	Theme.list(scroll, 6)
-	Theme.label(scroll, r.title, 16, { Font = Theme.FontBold })
-	Theme.label(scroll, r.reason, 14, { TextColor3 = if r.success then C.Good else C.Danger })
-	Theme.label(scroll, string.format("Длительность: %02d:%02d · Seed: %d", math.floor(r.duration / 60), math.floor(r.duration % 60), r.seed), 13, { TextColor3 = C.TextDim })
-	Theme.header(scroll, "Отчёт")
-	Theme.label(scroll, (r.mainDone and "■" or "□") .. " Основная цель", 14)
-	Theme.label(scroll, (r.optionalDone and "■" or "□") .. " Дополнительная задача", 14)
-	Theme.label(scroll, (r.evacuated and "■" or "□") .. " Эвакуация", 14)
-	Theme.label(scroll, string.format("Найдено документов: %d", r.documents or 0), 14)
-	Theme.header(scroll, "Вознаграждение")
-	for _, line in r.lines do
-		Theme.label(scroll, string.format("%s  <b>%+d</b>", line.label, line.value), 14, { TextColor3 = if line.value < 0 then C.Danger else C.Text })
-	end
-	Theme.label(scroll, string.format("ИТОГО: <b>%d</b> кредитов", r.reward), 18, { TextColor3 = C.Accent })
-	Theme.button(body, "ВЕРНУТЬСЯ В ЛОББИ", function()
-		Net.func("ReturnToLobby"):InvokeServer()
-		if modalGui then
-			modalGui:Destroy()
-			modalGui = nil
-		end
-	end, { Position = UDim2.new(0, 0, 1, -40), Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = C.PanelAlt })
+	Theme.label(body, "ИТОГО: " .. tostring(r.reward or 0), 18, { Font = Theme.FontBold, TextColor3 = Theme.Colors.Accent })
+	Theme.button(body, "ВЕРНУТЬСЯ НА БАЗУ", function()
+		task.spawn(function()
+			pcall(function()
+				Net.func("ReturnToLobby"):InvokeServer()
+			end)
+		end)
+		closeModal()
+	end)
 	Theme.playUISound(if r.success then "UIConfirm" else "UIError")
 end
 
 function HUDController.ShowDocument(d)
-	if modalGui then
-		modalGui:Destroy()
-	end
-	modalGui = Theme.screen("NS_Modal", 50)
-	local body = Theme.modal(modalGui, d.title, 560, 440, function()
-		modalGui = nil
-	end)
+	local body = openModal(d.kind .. " · " .. d.title, 620, 480)
 	local scroll = Theme.scroll(body)
 	Theme.list(scroll, 6)
-	Theme.label(scroll, string.format("%s · %s%s", d.kind, d.author, if d.isNew then "   <font color='#5ad282'>НОВЫЙ ДОКУМЕНТ → АРХИВ</font>" else ""), 13, { TextColor3 = C.TextDim })
-	Theme.label(scroll, d.body, 15, { Font = Theme.FontMono, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y })
-	CameraController.InputLocked = true
-	modalGui.Destroying:Connect(function()
-		CameraController.InputLocked = false
-	end)
+	Theme.label(scroll, "Автор: " .. (d.author or "—") .. (if d.isNew then "   · НОВЫЙ ДОКУМЕНТ" else ""), 12, { TextColor3 = if d.isNew then Theme.Colors.Good else Theme.Colors.TextDim })
+	Theme.label(scroll, d.body or "", 15, { Font = Theme.FontMono, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0) })
+	Theme.button(scroll, "ЗАКРЫТЬ", closeModal)
+	Theme.playUISound("UIConfirm")
 end
 
 function HUDController.init()
-	gui = Theme.screen("NS_HUD", 10)
-	buildObjective()
-	buildStatus()
-	buildNotifications()
-	buildDowned()
-	buildMobile()
-	HUDController.ApplyRoundState({ phase = "Idle" })
-
+	build()
 	Net.event("RoundState").OnClientEvent:Connect(HUDController.ApplyRoundState)
 	Net.event("TaskUpdated").OnClientEvent:Connect(function(t)
-		if currentState and currentState.tasks then
-			local replaced = false
-			for i, old in currentState.tasks do
-				if old.id == t.id then
-					currentState.tasks[i] = t
-					replaced = true
-				end
-			end
-			if not replaced then
-				table.insert(currentState.tasks, t)
-			end
-			renderTasks(currentState.tasks)
-		end
+		applyTask(t)
 	end)
 	Net.event("Notification").OnClientEvent:Connect(HUDController.Notify)
 	Net.event("Briefing").OnClientEvent:Connect(HUDController.ShowBriefing)
 	Net.event("Results").OnClientEvent:Connect(HUDController.ShowResults)
 	Net.event("DocumentFound").OnClientEvent:Connect(HUDController.ShowDocument)
-	Net.event("SignalBroadcast").OnClientEvent:Connect(HUDController.Signal)
-	Net.event("FacilityState").OnClientEvent:Connect(function(st)
-		if st.alarm then
-			HUDController.Subtitle("[сирена] Аварийный режим объекта", 4)
+	Net.event("Subtitle").OnClientEvent:Connect(function(payload)
+		if payload and payload.lines then
+			HUDController.Lines(payload.lines)
 		end
 	end)
-	Net.event("CreatureState").OnClientEvent:Connect(function(s)
-		if s.state == "Suspicious" then
-			HUDController.Subtitle("[скрип снаряжения неподалёку]", 2.5)
-		elseif s.state == "Chase" then
-			HUDController.Subtitle("[тяжёлые быстрые шаги]", 3)
+	Net.event("StoryEvent").OnClientEvent:Connect(function(payload)
+		if payload and payload.text then
+			HUDController.Subtitle(payload.text, 4)
 		end
 	end)
-	Net.event("PlayerFlags").OnClientEvent:Connect(function(f)
-		downedOverlay.Visible = f.downed == true
-		CameraController.SetDowned(f.downed == true)
-		if f.downed then
-			selfRescueBtn.Active = (f.selfRescueCharges or 0) > 0 and not f.selfRescuing
-			selfRescueBtn.Text = if f.selfRescuing then "ИНЪЕКЦИЯ ДЕЙСТВУЕТ..." else string.format("ИНЪЕКЦИЯ (%d)", f.selfRescueCharges or 0)
-			local deadline = f.downedUntil
-			task.spawn(function()
-				while downedOverlay.Visible and deadline do
-					local left = math.max(0, deadline - os.clock())
-					downedTimer.Text = string.format("Окно спасения: %d с · ползите к укрытию", math.ceil(left))
-					task.wait(0.5)
-				end
-			end)
+	Net.event("ClockState").OnClientEvent:Connect(function(c)
+		clockLabel.Text = c.text
+		clockLabel.TextColor3 = if c.night then Theme.Colors.Danger else Theme.Colors.Accent
+	end)
+	Net.event("PowerState").OnClientEvent:Connect(function(ps)
+		if not ps then
+			return
+		end
+		local g = ps.generator
+		powerLights.gen.BackgroundColor3 = if g.running and not g.tripped then (if g.degraded or g.fault then Theme.Colors.Warm else Theme.Colors.Good) else Theme.Colors.Danger
+		for _, c in ps.circuits do
+			local dot = powerLights[c.id]
+			if dot then
+				dot.BackgroundColor3 = if c.powered then Theme.Colors.Good elseif c.on then Theme.Colors.Warm else Theme.Colors.TextDim
+			end
 		end
 	end)
-
-	-- Status bars
+	Net.event("PlayerFlags").OnClientEvent:Connect(applyFlags)
+	Net.event("InventoryUpdated").OnClientEvent:Connect(function(inv)
+		inventory = inv
+		toolLabel.Text = if inv.toolName then "Инструмент: " .. inv.toolName else ""
+		rebuildItems()
+	end)
+	Net.event("HeadcountResult").OnClientEvent:Connect(function(h)
+		local text = string.format("ПЕРЕСЧЁТ (%s): в секторе %d, по журналу %d", h.by or "", h.bodies or 0, h.roster or 0)
+		HUDController.Notify({ title = "Пересчёт участников", text = text, kind = if (h.bodies or 0) ~= (h.roster or 0) then "danger" else "info" })
+	end)
+	Net.event("ScannerEvent").OnClientEvent:Connect(function(e)
+		HUDController.Notify({ title = "Контроль входа · " .. (e.name or ""), text = e.reason or "", kind = if e.ok then "info" else "danger" })
+	end)
+	Net.event("SignalBroadcast").OnClientEvent:Connect(function(s)
+		HUDController.Notify({ title = s.sender, text = s.text, kind = "info" })
+	end)
+	Net.event("Cinematic").OnClientEvent:Connect(function(c)
+		if c.kind == "Boarding" then
+			gui.Enabled = false
+		end
+	end)
+	-- Local polling for stamina and the cosmetic battery bar.
 	task.spawn(function()
 		while true do
 			task.wait(0.15)
-			local char = player.Character
-			local hum = char and char:FindFirstChildOfClass("Humanoid")
-			if hum and statusFrame.Visible then
-				healthBar.Size = UDim2.new(math.clamp(hum.Health / math.max(1, hum.MaxHealth), 0, 1), 0, 1, 0)
-				staminaBar.Size = UDim2.new(CameraController.Stamina / GameConfig.Character.StaminaMax, 0, 1, 0)
-				batteryBar.Size = UDim2.new(CameraController.Battery / GameConfig.Flashlight.BatterySeconds, 0, 1, 0)
-				batteryBar.BackgroundColor3 = if CameraController.Flashlight then C.Accent else C.TextDim
-				local toolId = player:GetAttribute("ActiveTool")
-				toolLabel.Text = if toolId and Tools.Defs[toolId] then "Инструмент: " .. Tools.Defs[toolId].name else "Инструмент: —"
+			if gui.Enabled then
+				stamFill.Size = UDim2.new(CameraController.Stamina / GameConfig.Character.StaminaMax, 0, 1, 0)
+				local b = FlashlightController.Battery / GameConfig.Flashlight.BatterySeconds
+				batFill.Size = UDim2.new(math.clamp(b, 0, 1), 0, 1, 0)
+				batLabel.Text = string.format("ФОНАРЬ [F]  %s", if FlashlightController.On then "вкл" else "выкл")
+				batFill.BackgroundColor3 = if b < 0.2 then Theme.Colors.Danger else Theme.Colors.Warm
 			end
 		end
 	end)
